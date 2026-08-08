@@ -90,6 +90,8 @@ def test_benchmark_summary_formats_cleanly():
         seed=0,
     )
     summary = result.summary()
-    assert "Win rates:" in summary
-    assert "Outcome distribution:" in summary
+    assert "Win rates" in summary
+    assert "Outcome distribution" in summary
     assert "ClassicGin" in summary
+    # 95% Wilson CI should show up in the header.
+    assert "95%" in summary

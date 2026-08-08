@@ -81,6 +81,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "'llm:gpt-4o-mini,greedy'. Defaults to random for every seat."
         ),
     )
+    p.add_argument(
+        "--paired",
+        action="store_true",
+        help=(
+            "Paired-hands variance reduction (bench mode, 2 players only): each "
+            "seed plays twice with seats swapped so both policies face the same deals."
+        ),
+    )
     return p
 
 
@@ -155,6 +163,7 @@ def _run_bench(args) -> int:
         num_games=args.games,
         seed=args.seed,
         num_players=args.players,
+        paired=args.paired,
         **kwargs,
     )
     result.print()
