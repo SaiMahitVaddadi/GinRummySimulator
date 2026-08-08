@@ -1,12 +1,18 @@
 """Command-line entry point.
 
-Examples
---------
-    gin-rummy                                   # one Classic Gin hand, 2 players
+Two modes:
+
+    # Play mode (default): one or more games with a running commentary.
+    gin-rummy                                          # single Classic Gin hand, 2 players
     gin-rummy --variant oklahoma --seed 42
     gin-rummy --variant hollywood --players 4 --hands 3
     gin-rummy --variant indian --players 4 --hand-size 13
-    gin-rummy --variant classic --games 1000 --quiet   # batch stats
+    gin-rummy --variant classic --games 1000 --seed 0 --quiet
+
+    # Benchmark mode: N games between named policies; prints a stats table.
+    gin-rummy --bench --games 500 --policies greedy,random --seed 0
+    gin-rummy --bench --variant oklahoma --policies greedy,greedy --games 1000
+    gin-rummy --bench --policies llm:gpt-4o-mini,greedy --games 20   # needs litellm
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import sys
 from collections import Counter
 from typing import Sequence
 
+from gin_rummy.bench import PolicyFactory, benchmark, build_policy_factory
 from gin_rummy.variants.classic import ClassicGin
 from gin_rummy.variants.hollywood import HollywoodGin
 from gin_rummy.variants.indian import IndianRummy
@@ -61,11 +68,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Hands per series (Hollywood variant only).",
     )
     p.add_argument("--quiet", action="store_true", help="Suppress per-game output.")
+    p.add_argument(
+        "--bench",
+        action="store_true",
+        help="Run in benchmark mode (aggregate stats across --games games).",
+    )
+    p.add_argument(
+        "--policies",
+        default=None,
+        help=(
+            "Comma-separated policy specs per seat, e.g. 'greedy,random' or "
+            "'llm:gpt-4o-mini,greedy'. Defaults to random for every seat."
+        ),
+    )
     return p
 
 
+def _parse_policies(spec: str | None, num_players: int) -> list[PolicyFactory]:
+    if not spec:
+        return [build_policy_factory("random") for _ in range(num_players)]
+    parts = [s.strip() for s in spec.split(",") if s.strip()]
+    if len(parts) != num_players:
+        raise SystemExit(
+            f"--policies expected {num_players} entries (one per seat), got {len(parts)}"
+        )
+    return [build_policy_factory(s) for s in parts]
+
+
 def _play_one(variant: str, players: int, seed: int | None, args) -> str | None:
-    """Return the winning player name (e.g. 'Player 1'), or None for a draw."""
     if variant == "hollywood":
         game = HollywoodGin(players, num_hands=args.hands, seed=seed)
         result = game.play()
@@ -79,8 +109,7 @@ def _play_one(variant: str, players: int, seed: int | None, args) -> str | None:
         if args.hand_size is not None:
             kwargs["hand_size"] = args.hand_size
         game = game_cls(players, seed=seed, **kwargs)
-    result = game.play()
-    return result.winner_name
+    return game.play().winner_name
 
 
 def _print_single_game(variant: str, players: int, seed: int | None, args) -> None:
@@ -91,9 +120,10 @@ def _print_single_game(variant: str, players: int, seed: int | None, args) -> No
         for i, hand in enumerate(result.hands, 1):
             print(f"  Hand {i}: {hand.outcome} in {hand.turns} turns → {hand.scores}")
         print(f"  Totals: {result.totals}")
-        print(
-            f"  Winner: {'Player ' + str(result.winner_id + 1) if result.winner_id is not None else 'draw'}"
+        winner = (
+            f"Player {result.winner_id + 1}" if result.winner_id is not None else "draw"
         )
+        print(f"  Winner: {winner}")
         return
 
     if variant == "indian":
@@ -111,8 +141,31 @@ def _print_single_game(variant: str, players: int, seed: int | None, args) -> No
     print(f"  Winner:  {result.winner_name or 'draw'}")
 
 
+def _run_bench(args) -> int:
+    if args.variant == "hollywood":
+        raise SystemExit("--bench doesn't support Hollywood (multi-hand series); pick another variant")
+    game_cls = VARIANTS[args.variant]
+    factories = _parse_policies(args.policies, args.players)
+    kwargs = {}
+    if args.hand_size is not None:
+        kwargs["hand_size"] = args.hand_size
+    result = benchmark(
+        game_cls=game_cls,
+        policy_factories=factories,
+        num_games=args.games,
+        seed=args.seed,
+        num_players=args.players,
+        **kwargs,
+    )
+    result.print()
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    if args.bench:
+        return _run_bench(args)
 
     if args.games == 1 and not args.quiet:
         _print_single_game(args.variant, args.players, args.seed, args)

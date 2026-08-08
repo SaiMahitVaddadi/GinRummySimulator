@@ -10,8 +10,10 @@ from gin_rummy.variants.classic import ClassicGin
 from gin_rummy.variants.oklahoma import OklahomaGin
 from gin_rummy.variants.hollywood import HollywoodGin, HollywoodResult
 from gin_rummy.variants.indian import IndianRummy
+from gin_rummy.policies.heuristic import GreedyKnockPolicy
+from gin_rummy.policies.llm import LLMPolicy
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Card",
@@ -19,9 +21,11 @@ __all__ = [
     "Deck",
     "GameResult",
     "GinRummyGame",
+    "GreedyKnockPolicy",
     "HollywoodGin",
     "HollywoodResult",
     "IndianRummy",
+    "LLMPolicy",
     "Observation",
     "OklahomaGin",
     "Player",
