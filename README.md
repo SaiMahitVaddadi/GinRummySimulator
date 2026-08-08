@@ -1,200 +1,129 @@
-# 🎴 Gin Rummy Simulator
+# Gin Rummy Simulator
 
-A comprehensive Gin Rummy simulator that implements multiple variants of the classic card game with random card dealing and automated gameplay.
+A fast, dependency-free, multi-variant rummy simulator. Designed to be a
+substrate for research on card-game AI — from random baselines to
+LLM-driven and RL agents.
 
-## 🎯 Features
+- **Zero runtime dependencies** — pure Python 3.10+ standard library.
+- **Exact optimal meld decomposition** via bitmask DP (~140 µs per
+  10-card hand on a laptop).
+- **Policy protocol** — the game engine is policy-agnostic, so a
+  ``RandomPolicy``, an LLM-backed policy, or an RL agent all plug in
+  identically.
+- **Seedable RNG** — every game is reproducible.
+- **Four variants shipped:** Classic Gin · Oklahoma Gin · Hollywood Gin
+  · Indian Rummy (3/7/10/13/15-card hand sizes).
 
-- **Classic Gin Rummy** - Traditional 10-card hands, knock with ≤10 deadwood
-- **Oklahoma Gin** - Variable knock limit based on first discard
-- **Hollywood Gin** - 3-game series with cumulative scoring
-- **Automated gameplay** - Random but strategic card play simulation
-- **Multiple simulation modes** - Single games or batch simulations
-- **Interactive and command-line interfaces**
+## Install
 
-## 📁 Project Structure
-
-```
-GinRummySimulator/
-├── src/
-│   ├── game_logic.py          # Core game mechanics (Card, Deck, Player, Game classes)
-│   ├── main/
-│   │   ├── __init__.py
-│   │   └── simulator.py       # Main simulator interface
-│   ├── variants/
-│   │   ├── __init__.py
-│   │   ├── classic_gin.py     # Classic Gin Rummy variant
-│   │   ├── oklahoma_gin.py    # Oklahoma Gin variant
-│   │   └── hollywood_gin.py   # Hollywood Gin variant
-│   └── __init__.py
-├── run.py                     # Main entry point script
-└── README.md                  # This file
-```
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-- Python 3.7 or higher
-- No external dependencies required (uses only Python standard library)
-
-### Running the Simulator
-
-#### Main Entry Point (Recommended)
 ```bash
-python run.py
+uv sync --extra dev        # installs the package + pytest
 ```
 
-#### Direct Access
+## CLI
+
 ```bash
-# Interactive mode
-python src/main/simulator.py
-
-# Command line mode
-python src/main/simulator.py --classic      # Classic Gin Rummy
-python src/main/simulator.py --oklahoma     # Oklahoma Gin  
-python src/main/simulator.py --hollywood    # Hollywood Gin
-python src/main/simulator.py --all          # All variants sequentially
+uv run gin-rummy                                      # one Classic Gin hand
+uv run gin-rummy --variant oklahoma --seed 42
+uv run gin-rummy --variant hollywood --players 4 --hands 3
+uv run gin-rummy --variant indian --players 4 --hand-size 13
+uv run gin-rummy --variant classic --games 1000 --seed 0 --quiet   # batch stats
 ```
 
-#### Run Individual Variants
+Or `python -m gin_rummy ...` if you'd rather not use the console script.
+
+## Library
+
+```python
+from gin_rummy import ClassicGin, HollywoodGin, RandomPolicy
+
+result = ClassicGin(num_players=2, seed=42).play()
+print(result.outcome, result.winner_name, result.scores)
+
+series = HollywoodGin(num_players=2, num_hands=3, seed=42).play()
+print(series.totals)
+```
+
+### Plugging in a custom policy
+
+The engine only needs three methods — draw source, discard choice, and
+knock/no-knock — so you can slot in any decision-maker. Here's a
+strawman "always draw from discard, always keep face cards" heuristic:
+
+```python
+from random import Random
+from gin_rummy import ClassicGin, Observation
+
+class KeepFacesPolicy:
+    def __init__(self, rng): self._rng = rng
+    def choose_draw_source(self, obs: Observation):
+        return "discard" if obs.top_discard else "deck"
+    def choose_discard(self, obs: Observation):
+        low = [c for c in obs.hand if c.value < 8]
+        return self._rng.choice(low) if low else self._rng.choice(obs.hand)
+    def choose_to_knock(self, obs: Observation, deadwood_value: int):
+        return True
+
+rng = Random(0)
+game = ClassicGin(2, seed=0, policies=[KeepFacesPolicy(rng), KeepFacesPolicy(rng)])
+print(game.play().scores)
+```
+
+The same protocol is what an LLM-backed policy will implement (see the
+roadmap below).
+
+## Package layout
+
+```
+src/gin_rummy/
+    cards.py         # Card, Deck, RANKS, SUITS
+    meld.py          # optimal_decomposition (exact bitmask DP)
+    player.py        # Player state
+    policy.py        # Policy protocol + RandomPolicy baseline
+    scoring.py       # ScoringRules
+    game.py          # GinRummyGame — the shared engine
+    variants/
+        classic.py
+        oklahoma.py
+        hollywood.py
+        indian.py
+    cli.py
+```
+
+## Tests
+
 ```bash
-python src/variants/classic_gin.py      # Classic Gin Rummy game
-python src/variants/oklahoma_gin.py     # Oklahoma Gin game
-python src/variants/hollywood_gin.py     # Hollywood Gin series
+uv run pytest
 ```
 
-## 🎮 Game Variants
+36 tests cover card fundamentals, exact meld decomposition on known
+hands, seeded reproducibility, and end-to-end play for every variant.
 
-### Classic Gin Rummy
-- 10 cards dealt to each player
-- Knock allowed with ≤10 deadwood points
-- Gin (0 deadwood) awards 25 bonus points
-- Supports 2-12 players with adaptive deck scaling
-- Standard scoring system
+## Variants
 
-### Oklahoma Gin
-- Knock limit determined by first discard:
-  - Ace: Only gin allowed (0 deadwood)
-  - Face cards: 10 points
-  - Number cards: Face value
-- More strategic and unpredictable gameplay
-- Supports 2-12 players with adaptive deck scaling
+| Variant | Hand | Knock threshold | Ends when |
+|---|---|---|---|
+| Classic Gin | 10 | ≤ 10 deadwood | knock, gin, or undercut |
+| Oklahoma Gin | 10 | rank of first upcard (A ⇒ gin only) | same |
+| Hollywood Gin | 10 | ≤ 10 deadwood | after N hands (default 3), by total |
+| Indian Rummy | 3 / 7 / 10 / 13 / 15 | ≤ 10 deadwood (approx.) | knock, gin |
 
-### Hollywood Gin
-- 3-game series with cumulative scoring
-- Points from each game add to running total
-- Higher strategic complexity over multiple games
-- Supports 2-12 players with adaptive deck scaling
-- Winner determined by highest total score
+The Indian Rummy variant is a rummy-family class exposing the
+hand-size knob; it does **not** attempt to model canonical Indian Rummy
+declaration rules (pure sequence requirement, joker wildcards, etc.).
+For a rules-faithful implementation see
+[IRumAI](https://arxiv.org/abs/2606.21975).
 
-## 🎯 Multi-Player Features
+## Roadmap
 
-- **Adaptive Deck Scaling**: Automatically uses optimal number of decks based on player count
-- **Smart Card Distribution**: Ensures fair card allocation across all players
-- **Multi-Player Scoring**: Handles knock/gin outcomes across all opponents
-- **Player Rotation**: Automatic turn progression through all players
+- LLM-backed `Policy` via [LiteLLM](https://github.com/BerriAI/litellm)
+  as a pluggable gateway.
+- Euchre variant — the natural partnership-signaling counterpart to
+  Gin Rummy's individual optimisation.
+- MCCFR / Deep-MC baselines for a normative reference agent.
+- Batch-metrics harness (game length, gin/knock/undercut/draw
+  distributions per variant × player count).
 
-### Player Count & Deck Scaling
-- 2 players: 1 deck (52 cards)
-- 3-4 players: 2 decks (104 cards)  
-- 5-6 players: 3 decks (156 cards)
-- 7+ players: Optimal scaling (capped at 8 decks)
+## License
 
-## 🎲 Simulation Features
-
-### Random Card Dealing
-- Standard 52-card deck with proper shuffling
-- Random but realistic draw/discard decisions
-- Strategic meld detection (sets and runs)
-
-### Automated Gameplay
-- Players automatically:
-  - Draw from deck or discard pile
-  - Form melds (sets of 3-4 same rank, runs of 3+ consecutive same suit)
-  - Calculate deadwood points
-  - Decide when to knock or go gin
-  - Discard strategically
-
-### Batch Simulations
-- Run multiple games for statistical analysis
-- Win rate tracking for both players
-- Configurable simulation count (1-100 games)
-
-## 📊 Example Output
-
-```
-Starting Classic Gin Rummy
-Player 1: ['K♠', '7♥', '4♦', '3♣', '9♠', '2♥', 'J♦', '8♣', '5♥', 'Q♠']
-Player 2: ['A♦', '6♣', '9♦', '3♥', 'K♥', '7♠', '10♣', '4♠', '2♦', 'J♥']
-Top of discard pile: 8♦
---------------------------------------------------
-Turn 1: Player 1 drew from deck and discarded 5♥
-Turn 2: Player 2 drew from discard pile and discarded 6♣
-...
-Turn 7: Player 1 GIN! Winner!
-
-Game Over! Winner: Player 1
-Final scores: {'Player 1': 25, 'Player 2': 0}
-```
-
-## 🎯 Game Rules Summary
-
-### Objective
-Arrange your 10 cards into melds while minimizing deadwood (unmatched cards).
-
-### Melds
-- **Sets**: 3-4 cards of same rank (e.g., 7♠ 7♥ 7♦)
-- **Runs**: 3+ consecutive cards of same suit (e.g., 4♣ 5♣ 6♣)
-
-### Winning
-- **Gin**: All 10 cards in melds (0 deadwood)
-- **Knock**: Deadwood ≤ limit (varies by variant)
-- **Undercut**: Opponent knocks with higher deadwood than you
-
-### Scoring
-- Gin: 25 bonus + opponent's deadwood
-- Knock: 10 bonus + deadwood difference
-- Undercut: 20 points to defender
-
-## 🔧 Technical Details
-
-### Core Classes
-- `Card`: Individual playing card with rank, suit, and value
-- `Deck`: 52-card deck with shuffling and dealing
-- `Player`: Hand management and meld analysis
-- `MeldAnalyzer`: Detects sets, runs, and calculates deadwood
-
-### Simulation Logic
-- Probabilistic draw decisions
-- Automatic meld detection
-- Strategic knock/gin evaluation
-- Configurable game parameters
-
-## 🎨 Customization
-
-The simulator is designed to be easily extensible:
-- Modify knock limits in variant files
-- Adjust simulation parameters
-- Add new Gin Rummy variants
-- Implement different AI strategies
-
-## 📈 Use Cases
-
-- Learn Gin Rummy rules and strategies
-- Test different game variant mechanics
-- Statistical analysis of game outcomes
-- Educational tool for card game theory
-- Foundation for more advanced AI implementations
-
-## 🤝 Contributing
-
-Feel free to extend the simulator with:
-- Additional Gin Rummy variants
-- More sophisticated AI strategies
-- GUI interface
-- Network multiplayer support
-- Advanced statistical analysis tools
-
----
-
-**Enjoy your Gin Rummy simulations! 🎴**
+MIT.

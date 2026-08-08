@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
+"""Backwards-compatible entry point.
+
+Prefer ``uv run gin-rummy ...`` or ``python -m gin_rummy ...``.
 """
-Main entry point for Gin Rummy Simulator
-"""
+
+from __future__ import annotations
 
 import sys
-import os
+from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from main.simulator import main
+from gin_rummy.cli import main  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
