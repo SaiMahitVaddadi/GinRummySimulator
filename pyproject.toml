@@ -21,6 +21,16 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov>=4"]
+llm = ["litellm>=1.40"]
+finetune = [
+    "transformers>=4.44",
+    "peft>=0.13",
+    "trl>=0.11",
+    "bitsandbytes>=0.44; platform_system != 'Darwin'",
+    "accelerate>=0.34",
+    "datasets>=3.0",
+]
+finetune-openai = ["openai>=1.50"]
 
 [project.scripts]
 gin-rummy = "gin_rummy.cli:main"
