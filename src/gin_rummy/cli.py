@@ -23,6 +23,8 @@ from collections import Counter
 from typing import Sequence
 
 from gin_rummy.bench import PolicyFactory, benchmark, build_policy_factory
+from gin_rummy.eval.reporters import export_jsonl, print_tournament
+from gin_rummy.eval.tournament import PolicyEntry, Tournament
 from gin_rummy.variants.classic import ClassicGin
 from gin_rummy.variants.hollywood import HollywoodGin
 from gin_rummy.variants.indian import IndianRummy
@@ -88,6 +90,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "Paired-hands variance reduction (bench mode, 2 players only): each "
             "seed plays twice with seats swapped so both policies face the same deals."
         ),
+    )
+    p.add_argument(
+        "--tournament",
+        action="store_true",
+        help=(
+            "Run a round-robin tournament instead of a 2-way bench. All policies "
+            "in --policies play every other; cross-play matrix + Bradley–Terry Elo "
+            "with bootstrap CIs are reported. Ignores --players (always 2-seat)."
+        ),
+    )
+    p.add_argument(
+        "--jsonl",
+        default=None,
+        help="Path to write full tournament results as JSONL for post-hoc analysis.",
     )
     return p
 
@@ -170,8 +186,42 @@ def _run_bench(args) -> int:
     return 0
 
 
+def _run_tournament(args) -> int:
+    if args.variant == "hollywood":
+        raise SystemExit("--tournament doesn't support Hollywood; pick another variant")
+    game_cls = VARIANTS[args.variant]
+    factories = _parse_policies(args.policies, num_players=len(_split_policies(args.policies)))
+    entries = [PolicyEntry(name=f.name, build=f.build) for f in factories]
+    kwargs = {}
+    if args.hand_size is not None:
+        kwargs["hand_size"] = args.hand_size
+    t = Tournament(
+        game_cls=game_cls,
+        entries=entries,
+        games_per_pair=args.games,
+        seed=args.seed,
+        paired=args.paired,
+        **kwargs,
+    )
+    result = t.run()
+    print_tournament(result)
+    if args.jsonl:
+        export_jsonl(result, args.jsonl)
+        print(f"[wrote {len(result.matches)} matches + summary to {args.jsonl}]")
+    return 0
+
+
+def _split_policies(spec: str | None) -> list[str]:
+    if not spec:
+        return ["random", "random"]
+    return [s.strip() for s in spec.split(",") if s.strip()]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    if args.tournament:
+        return _run_tournament(args)
 
     if args.bench:
         return _run_bench(args)
