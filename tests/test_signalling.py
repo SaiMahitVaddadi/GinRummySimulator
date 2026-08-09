@@ -131,7 +131,9 @@ def test_byzantine_policy_plugs_in():
 # ---------------------------------------------------- experiment smoke ---
 
 
-@pytest.mark.parametrize("treatment", ["silent", "cooperative", "byzantine"])
+@pytest.mark.parametrize(
+    "treatment", ["silent", "cooperative", "byzantine", "closed_loop"]
+)
 def test_run_treatment_smoke_n6(treatment):
     r = run_treatment(
         treatment, n_games=6, seed=0, n_resamples=20
@@ -170,6 +172,7 @@ def test_run_signalling_end_to_end_writes_jsonl(tmp_path):
         "silent",
         "cooperative",
         "byzantine",
+        "closed_loop",
     }
     lines = out.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1 + len(results)  # config + treatments
@@ -181,4 +184,9 @@ def test_run_signalling_end_to_end_writes_jsonl(tmp_path):
 
 
 def test_builders_registered_for_all_treatments():
-    assert set(BUILDERS) == {"silent", "cooperative", "byzantine"}
+    assert set(BUILDERS) == {
+        "silent",
+        "cooperative",
+        "byzantine",
+        "closed_loop",
+    }

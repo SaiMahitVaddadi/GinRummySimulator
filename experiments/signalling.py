@@ -1,13 +1,22 @@
 """§6 predictions #4 and #5 — structured signalling in Euchre.
 
-Runs three treatments over the same ``N`` seeds (0..N-1):
+Runs four treatments over the same ``N`` seeds (0..N-1):
 
 * **silent**       — all four seats play :class:`RandomEuchrePolicy`.
 * **cooperative**  — seats 0 & 2 (team 0) wrap their random policy in
-                     :class:`EuchreTalkingPolicy`; team 1 stays silent.
+                     :class:`EuchreTalkingPolicy` (emit-only); team 1
+                     stays silent.
 * **byzantine**    — seat 0 uses :class:`EuchreTalkingPolicy`; seat 2
                      (its partner) uses :class:`EuchreByzantinePolicy`
-                     wrapping a talker; team 1 stays silent.
+                     wrapping a talker; team 1 stays silent. Still
+                     emit-only.
+* **closed_loop**  — seats 0 & 2 use talk-and-listen wiring via
+                     :func:`ClosedLoopTeam`: each plays a listener
+                     wrapping a talker over the shared channel. Team 1
+                     stays silent. This is the treatment that
+                     actually closes the coordination loop; the
+                     three above are emit-only baselines kept for
+                     comparison.
 
 For each treatment we report:
 
@@ -17,12 +26,16 @@ For each treatment we report:
   seats' plays, computed with the same coarse buckets as
   ``comms.analyze`` so numbers are comparable across treatments.
 * Average number of signals broadcast per game.
+* Listener fidelity: total listener actions, and the fraction that
+  were actually signal-conditioned (i.e. the listener rule fired and
+  chose a different card than the inner policy). Zero for the three
+  emit-only treatments — they carry no listener.
 
-The point is not to argue for or against §6 predictions in the
-abstract — it is to observe what our concrete implementation actually
-does. Emit-only signalling policies (no read-side wiring on the
-channel) predict *no* effect on either win rate or partner MI; we
-report that faithfully.
+The point is to observe what our concrete implementation does. In the
+current build the closed_loop arm is the only one wired to *react* to
+signals; the silent / cooperative / byzantine arms are byte-identical
+in play behaviour and exist only to prove that signals alone don't
+move partner-MI or win rate.
 
 Usage
 -----
@@ -48,14 +61,16 @@ from gin_rummy.comms.analyze import (
 )
 from gin_rummy.comms.channel import MessageChannel
 from gin_rummy.comms.euchre_signals import (
+    ClosedLoopTeam,
     EuchreByzantinePolicy,
+    EuchreListeningPolicy,
     EuchreTalkingPolicy,
 )
 from gin_rummy.eval.stats import BootstrapCI, ProportionCI, wilson_ci
 from gin_rummy.variants.euchre import EuchrePolicy, RandomEuchrePolicy
 
 
-Treatment = Literal["silent", "cooperative", "byzantine"]
+Treatment = Literal["silent", "cooperative", "byzantine", "closed_loop"]
 
 TEAM0_SEATS: tuple[int, ...] = (0, 2)
 
@@ -96,10 +111,35 @@ def _byzantine_builder(
     ]
 
 
+def _closed_loop_builder(
+    rng: random.Random, channel: MessageChannel
+) -> list[EuchrePolicy]:
+    """Talk-and-listen on both team-0 seats; team-1 silent random.
+
+    ``ClosedLoopTeam`` wires an :class:`EuchreListeningPolicy` at each
+    of seats 0 and 2, with an :class:`EuchreTalkingPolicy` as its
+    inner, all sharing ``channel``. That combines emission (via the
+    talker) with reaction (via the listener) so partner signals can
+    actually change plays.
+    """
+    listener0, listener2 = ClosedLoopTeam(
+        seat0=RandomEuchrePolicy(rng),
+        seat2=RandomEuchrePolicy(rng),
+        channel=channel,
+    )
+    return [
+        listener0,
+        RandomEuchrePolicy(rng),
+        listener2,
+        RandomEuchrePolicy(rng),
+    ]
+
+
 BUILDERS: dict[Treatment, PolicyBuilder] = {
     "silent": _silent_builder,
     "cooperative": _cooperative_builder,
     "byzantine": _byzantine_builder,
+    "closed_loop": _closed_loop_builder,
 }
 
 
@@ -124,6 +164,10 @@ class TreatmentResult:
     own_mi_point: float
     signals_per_game: float
     total_signals: int
+    # Listener fidelity — 0 for emit-only treatments.
+    listener_plays_total: int = 0
+    listener_plays_signal_conditioned: int = 0
+    listener_signal_conditioned_fraction: float = 0.0
 
 
 # ------------------------------------------------------------- experiment ---
@@ -134,7 +178,7 @@ def _play_one(
     treatment: Treatment,
     seed: int,
     game_id: int,
-) -> tuple[list[PlaySample], int | None, int]:
+) -> tuple[list[PlaySample], int | None, int, int, int]:
     """Play one Euchre hand under ``treatment``.
 
     Returns
@@ -145,6 +189,13 @@ def _play_one(
         0, 1, or ``None`` for pass-out.
     signal_count
         Number of messages broadcast by the treatment's talkers.
+    listener_plays
+        Total ``choose_play`` invocations across any
+        :class:`EuchreListeningPolicy` seats in this game (0 for
+        emit-only treatments).
+    listener_signal_conditioned
+        Subset of the above where the listener actually diverged from
+        its inner policy because of a partner signal.
     """
     channel = MessageChannel()
     # RNG for the policies is kept separate from the game's dealing RNG
@@ -157,7 +208,21 @@ def _play_one(
         policies=policies, seed=seed, game_id=game_id
     )
     result = game.play()
-    return game.samples, result.winner_team, len(channel)
+
+    listener_plays = 0
+    listener_conditioned = 0
+    for p in policies:
+        if isinstance(p, EuchreListeningPolicy):
+            listener_plays += p.plays_total
+            listener_conditioned += p.plays_signal_conditioned
+
+    return (
+        game.samples,
+        result.winner_team,
+        len(channel),
+        listener_plays,
+        listener_conditioned,
+    )
 
 
 def _mi_ci(
@@ -191,11 +256,19 @@ def run_treatment(
     per_game_team0: list[list[PlaySample]] = []
     wins = ties = losses = passouts = 0
     total_signals = 0
+    listener_plays_total = 0
+    listener_conditioned_total = 0
     for gid in range(n_games):
-        samples, winner_team, sig_count = _play_one(
-            treatment=treatment, seed=seed + gid, game_id=gid
-        )
+        (
+            samples,
+            winner_team,
+            sig_count,
+            l_plays,
+            l_cond,
+        ) = _play_one(treatment=treatment, seed=seed + gid, game_id=gid)
         total_signals += sig_count
+        listener_plays_total += l_plays
+        listener_conditioned_total += l_cond
         team0_samples = [s for s in samples if s.seat in TEAM0_SEATS]
         per_game_team0.append(team0_samples)
         if winner_team is None:
@@ -228,6 +301,11 @@ def run_treatment(
         own_mi = 0.0
         partner_ci = BootstrapCI(0.0, 0.0, 0.0, level, n_resamples)
 
+    conditioned_frac = (
+        listener_conditioned_total / listener_plays_total
+        if listener_plays_total
+        else 0.0
+    )
     return TreatmentResult(
         treatment=treatment,
         n_games=n_games,
@@ -245,6 +323,9 @@ def run_treatment(
         own_mi_point=own_mi,
         signals_per_game=total_signals / n_games if n_games else 0.0,
         total_signals=total_signals,
+        listener_plays_total=listener_plays_total,
+        listener_plays_signal_conditioned=listener_conditioned_total,
+        listener_signal_conditioned_fraction=conditioned_frac,
     )
 
 
@@ -253,10 +334,15 @@ def run_signalling(
     n_games: int = 200,
     seed: int = 0,
     n_resamples: int = 500,
-    treatments: Sequence[Treatment] = ("silent", "cooperative", "byzantine"),
+    treatments: Sequence[Treatment] = (
+        "silent",
+        "cooperative",
+        "byzantine",
+        "closed_loop",
+    ),
     output_path: Path | None = None,
 ) -> list[TreatmentResult]:
-    """Run all three treatments and (optionally) write JSONL results."""
+    """Run all four treatments and (optionally) write JSONL results."""
     results = [
         run_treatment(
             t, n_games=n_games, seed=seed, n_resamples=n_resamples
@@ -292,6 +378,7 @@ def _format_table(results: Sequence[TreatmentResult]) -> str:
         f"{'treatment':<14}{'games':>6}{'wins':>6}{'losses':>7}"
         f"{'win rate (Wilson 95%)':>26}"
         f"{'partner MI [95% CI]':>30}{'sig/game':>10}"
+        f"{'listener fired':>18}"
     )
     lines = [header, "-" * len(header)]
     for r in results:
@@ -303,10 +390,17 @@ def _format_table(results: Sequence[TreatmentResult]) -> str:
             f"{r.partner_mi_point:.4f} "
             f"[{r.partner_mi_lower:.4f},{r.partner_mi_upper:.4f}]"
         )
+        listener_cell = (
+            f"{r.listener_plays_signal_conditioned}/{r.listener_plays_total}"
+            f" ({r.listener_signal_conditioned_fraction * 100:.1f}%)"
+            if r.listener_plays_total
+            else "n/a"
+        )
         lines.append(
             f"{r.treatment:<14}{r.n_games:>6}{r.team0_wins:>6}"
             f"{r.team0_losses:>7}{wilson:>26}{mi:>30}"
             f"{r.signals_per_game:>10.2f}"
+            f"{listener_cell:>18}"
         )
     return "\n".join(lines)
 

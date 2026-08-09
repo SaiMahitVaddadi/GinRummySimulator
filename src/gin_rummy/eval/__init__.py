@@ -12,6 +12,18 @@ Layered modules:
 * ``reporters``   — text summary and JSONL export for reproducibility.
 """
 
+from gin_rummy.eval.ablation import (
+    AblationResult,
+    AssignmentRun,
+    Factor,
+    FactorAssignment,
+    FactorialDesign,
+    FractionalFactorialDesign,
+    InteractionEffect,
+    MainEffect,
+    analysis,
+    run_ablation,
+)
 from gin_rummy.eval.ensemble import (
     ConfidenceWeightedEnsemble,
     HandStrengthGatedMoE,
@@ -50,14 +62,22 @@ from gin_rummy.eval.xplain import (
 )
 
 __all__ = [
+    "AblationResult",
+    "AssignmentRun",
     "BehavioralFingerprint",
     "BootstrapCI",
     "ChannelContribution",
     "ConfidenceWeightedEnsemble",
     "DecisionRecord",
+    "Factor",
+    "FactorAssignment",
+    "FactorialDesign",
+    "FractionalFactorialDesign",
     "HandIntrospection",
     "HandStrengthGatedMoE",
+    "InteractionEffect",
     "KFoldReport",
+    "MainEffect",
     "MatchOutcome",
     "PhaseGatedMoE",
     "PolicyEntry",
@@ -68,6 +88,7 @@ __all__ = [
     "Tournament",
     "TournamentResult",
     "VotingEnsemble",
+    "analysis",
     "bootstrap_ci",
     "bradley_terry_ratings",
     "deal_kfold",
@@ -83,6 +104,7 @@ __all__ = [
     "rating_ci_table",
     "reward_channels",
     "rollout_regret",
+    "run_ablation",
     "seed_ensemble",
     "wilson_ci",
 ]

@@ -95,18 +95,90 @@ one-line takeaway from each.*
 
 ---
 
-## 5. Proposed empirical section (matched-arm experiment)
+## 5. Empirical programme — the paper as an ablation study
 
-Four seats × four architecture families × two games:
+Rather than reporting head-to-head win rates as isolated points, we
+frame every architectural addition as **a factor in a designed
+experiment**. Each add — heuristic sub-rule, ensemble, MoE gate, tool
+call, signal channel, listener rule, fine-tuning method — becomes a
+factor with named levels, and we run either the full 2^k factorial or a
+resolution-III fractional factorial when k is large. The framework
+(`src/gin_rummy/eval/ablation.py`) ships main-effects tables with
+Wilson CIs, pairwise interaction effects with paired-sign tests
+Holm-Bonferroni-corrected, and an overall factor ranking by effect
+magnitude.
 
-|            | Random | Heuristic | Deep-MC RL (IRumAI-style) | LLM (frontier, no tools) | LLM + meld solver (novel) | CFR (mini-gin only) | GNN (Gin only) |
-|------------|--------|-----------|----------------------------|--------------------------|----------------------------|----------------------|-----------------|
-| **Classic Gin (2p)** | ✓ | ✓ | needs training | ✓ | ✓ | via mini-gin projection | needs training |
-| **Euchre (2v2)** | ✓ | needs impl. | needs training | ✓ | — | out of scope | needs training |
+### 5a. Heuristic-decomposition ablation (2 × 3 × 2 = 12 cells)
 
-Report per matchup:
+The `GreedyKnockPolicy` is not one thing — it is three independent
+rules the ablation framework can now enumerate. Running the full
+factorial vs. `RandomPolicy` at 50 games per pairing produces
+(`experiments/ablation_heuristic.py`):
 
-* Head-to-head win rate with Wilson 95% CI, **paired hands**.
+| Factor    | Levels                                              |
+|-----------|-----------------------------------------------------|
+| `draw`    | `deck` (always deck) · `smart` (take-if-reduces-DW) |
+| `discard` | `random` · `highest_deadwood` · `safe_from_opp`     |
+| `knock`   | `wait_for_gin` (never knock) · `always` (knock ASAP)|
+
+**Main effects (draws-inclusive win-rate range across levels):**
+
+| Factor    | Range    | Best level         | Worst level      |
+|-----------|----------|--------------------|------------------|
+| `knock`   | **48.7 pp** | `always` → 72.7 %  | `wait_for_gin` → 24.0 % |
+| `discard` | **33.5 pp** | `highest_deadwood` / `safe_from_opp` tied → 59.5 % | `random` → 26.0 % |
+| `draw`    | **20.0 pp** | `smart` → 58.3 %   | `deck` → 38.3 %  |
+
+**Pairwise interactions (Holm–Bonferroni corrected):**
+
+| Pair              | Magnitude | p (Holm) | Reject H₀ |
+|-------------------|-----------|----------|-----------|
+| `discard × knock` | **43.0 pp** | < 0.001  | **yes**   |
+| `draw × discard`  | 9.0 pp    | 0.20     | no        |
+| `draw × knock`    | 2.7 pp    | 0.69     | no        |
+
+**Findings that shape the paper's narrative:**
+
+1. **The single most impactful addition is the *knock rule*.** Turning
+   on knock-ASAP over holding out for gin swings win rate by ~50 pp on
+   its own. Every heuristic in the literature agrees on this
+   qualitatively; we quantify it under a controlled factorial.
+2. **Discard × knock is the largest interaction we can detect.** The
+   value of a smart discard depends on whether you will knock —
+   *without* a knock rule, better discards do very little; *with*
+   knock-ASAP, discard quality is worth 33 pp. This is the empirical
+   version of the folk wisdom "discard defensively when you're planning
+   to knock."
+3. **Draw source is the smallest of the three main effects.** Random
+   drawing is only ~20 pp worse than the "take-if-reduces-deadwood"
+   rule, which is the classical folklore. Some effort in the literature
+   has been spent optimising draw policies; the ablation suggests
+   diminishing returns relative to discard and knock rules.
+
+### 5b. Higher-order ablations (matched-arm, current status)
+
+Beyond the heuristic decomposition, we treat every remaining
+architectural add as its own factor. Status of each add — evidence in
+hand from `experiments/matched_arm.py`, `experiments/cfr_curve.py`,
+`experiments/signalling.py`, `experiments/cot_faithfulness.py`:
+
+| Factor                            | Levels                                            | Observed contribution |
+|-----------------------------------|---------------------------------------------------|-----------------------|
+| **Policy family**                 | random · greedy · vote3 · phase_moe · hand_moe    | Greedy family ≈ 1780 BT-Elo, random 840; ensembling and MoE add < 5 Elo over a single greedy expert |
+| **Ensemble type**                 | none · voting3 · phase-gated · hand-strength-gated | Statistically indistinguishable from base greedy at 200 games/pair — the ensemble/MoE gain is smaller than our CI |
+| **CFR training**                  | uniform · MCCFR-5k · MCCFR-abstracted-10k         | Mini-gin: −22.7 % exploitability. Abstracted-Gin: sampled-BR *rises* (see §3 finding); head-to-head vs uniform monotonically increases to +0.14 |
+| **LLM tools**                     | plain LLM · LLM + meld_analyzer_tool               | **Deferred**: needs credentials; infra ready |
+| **Signalling channel**            | silent · emit-only · byzantine emit · closed-loop | Silent ≈ emit-only ≈ byzantine (all identical, listener-less). Closed-loop: partner MI 0.023 vs silent 0.026 — **hand-written listener does not lift MI** |
+| **CoT rationale**                 | off · on                                          | Framework operational; scripted mode detects stated–actual gap correctly |
+| **DPO from game outcomes**        | off · SFT · SFT+DPO · SPIN                        | Infrastructure ready; empirical run requires GPU |
+
+**Every one of these is one CLI flag away** from being run as a factor
+in a larger factorial once the LLM/GPU/credential prerequisites are
+supplied.
+
+### 5c. What we measure per matchup
+
+* Head-to-head win rate with Wilson 95 % CI, **paired hands**.
 * Bradley–Terry Elo with bootstrap CIs across all pairings.
 * Outcome distribution (gin / knock / undercut / draw).
 * **Cost per decision** (µs / ms / $ / tokens-in / tokens-out).
@@ -117,8 +189,9 @@ Report per matchup:
 * **Approximate exploitability** of the CFR-trained policy on mini-gin
   (exact best-response) — the only setting where Nash-distance is
   computable, but it anchors the whole scale.
+* **Main-effects table + interaction table** from every ablation run.
 
-Ablations:
+### 5d. Ablations we specifically call out
 
 * LLM alone vs. LLM + meld-solver tool (isolates the tool contribution).
 * Ensemble (heuristic + LLM + RL vote) vs. best single (isolates
@@ -175,22 +248,36 @@ Each is one command away from being re-run against a fresh seed.
    *Prediction:* corrected I(A; H_partner | H_own, public) rises from
    the ~0.02 nats random baseline to ≥ 0.10 nats with `TalkingPolicy`
    on both partners.
-   **✗ Falsified in the current build.** Silent / cooperative /
-   byzantine treatments all report **partner MI = 0.026 nats** and
-   team-0 win rate = 0.477 — byte-identical because
-   `EuchreTalkingPolicy` emits signals but no policy *listens*. Only
-   the emitter half of closed-loop coordination is implemented today.
-   The signals broadcast correctly (7.5 per game) and Byzantine tags
-   land on the intended seat; what's missing is a `ListeningPolicy`
-   that conditions plays on incoming signals. This is now the top
-   entry in §10 follow-up work.
+   **✗ Now honestly falsifiable — and honestly falsified.** The
+   `EuchreListeningPolicy` closes the loop (listener fires on 7.8 % of
+   team-0 plays, verified by decision-fidelity telemetry). Four
+   treatments at N=200 (seed 0):
+
+   | Treatment       | Team-0 win rate      | Partner MI [95 % CI]     | Signals/game | Listener fired |
+   |-----------------|----------------------|--------------------------|--------------|----------------|
+   | silent          | 0.477 [0.409, 0.547] | 0.0259 [0.0314, 0.0537]  | 0.00         | n/a            |
+   | cooperative-emit | 0.477 [0.409, 0.547] | 0.0259 [0.0314, 0.0537]  | 7.49         | n/a            |
+   | byzantine-emit  | 0.477 [0.409, 0.547] | 0.0259 [0.0314, 0.0537]  | 7.49         | n/a            |
+   | **closed-loop** | 0.487 [0.418, 0.557] | 0.0228 [0.0271, 0.0513]  | 7.55         | **154/1970 (7.8 %)** |
+
+   Partner MI in the closed-loop arm is *lower* than the silent
+   baseline (0.023 vs 0.026, CIs overlap). Hand-written listening
+   rules over a random inner substrate **do not lift coordination
+   above chance**. This is a real, non-trivial methodological finding:
+   *signalling infrastructure alone is not sufficient — the content of
+   the protocol and the base-policy competence both have to be
+   sophisticated*. A learned or search-based listener is the natural
+   next step.
 
 5. **Byzantine partner collapses cooperation.**
    *Prediction:* team-0 win rate drops below the silent baseline when
    one partner uses `ByzantinePolicy`.
-   **✗ Not falsifiable in the current build**, for the same
-   listener-half reason: a lie the victim doesn't hear cannot mislead.
-   Same infra fix would enable this test.
+   **✗ Vacuously not-supported** — with prediction #4 not holding at
+   the baseline, a byzantine-collapse test compares noise to noise.
+   The byzantine emitter is trivially wireable through the closed loop
+   (the listener already accepts `kind="byzantine"` payloads), but the
+   test is not scientifically meaningful until a listener that
+   actually confers a signal-based advantage exists.
 
 6. **CoT rationales are only weakly aligned with actions.**
    *Prediction:* behavioural fingerprints diverge from the LLM's stated
@@ -206,10 +293,40 @@ Each is one command away from being re-run against a fresh seed.
 ### Summary
 
 Two predictions confirmed (#1, #6 in scaffold), one nuanced with a
-real finding about BR-vs-abstraction (#3), two falsified due to
-scoped implementation gap (#4, #5), one deferred pending credentials
-(#2). This is exactly the split a working experiment programme is
-supposed to produce.
+real finding about BR-vs-abstraction (#3), one honestly falsified after
+closing the loop (#4 — the listener works, but hand-crafted rules don't
+lift MI), one vacuously not-supported downstream of it (#5), one
+deferred pending credentials (#2). This is exactly the split a working
+experiment programme is supposed to produce.
+
+### 6a. Which addition mattered most?
+
+Cross-tabulating the ablation results in §5 against the predictions
+above yields a clean ranking of *empirical contribution to policy
+quality*:
+
+1. **`knock_asap`** — the single largest factor (48.7 pp main effect;
+   43 pp discard×knock interaction). Almost every historical rummy
+   engine agrees; the ablation quantifies it.
+2. **`discard_highest_deadwood`** — 33 pp main effect, essentially
+   ties `discard_safe_from_opp` (the belief-modelling stub); the safe
+   variant needs a real card-tracker to see if it separates.
+3. **`draw_if_reduces_deadwood`** — 20 pp main effect. Real, but the
+   smallest of the three heuristic sub-rules.
+4. **Ensembles and MoE over identical experts** — within 5 Elo of the
+   single expert; the historical +122 Elo M2CTS chess result requires
+   *different* experts per phase, which our current MoE lacks.
+5. **CFR training on abstracted Gin** — measurable head-to-head
+   improvement (up to +14 pp vs uniform) but a real methodological
+   caveat about sampled-BR under strategy sharpening.
+6. **Signalling infrastructure without competent listener/inner
+   policy** — no measurable coordination lift.
+
+The dominant lesson: **rule-timing (knock) and rule-quality (discard)
+dwarf every architectural add we can currently ship**. Ensembles,
+signalling, MoE, and CFR contribute only after those two are set well
+— and neither is a "novel" addition; they are exactly the folk-heuristic
+components long known to matter.
 
 ---
 
@@ -237,6 +354,17 @@ supposed to produce.
 * An **explainability suite** (introspection, contrastive discard,
   reward channels, behavioural fingerprints, rollout regret) drawn from
   Milani et al. 2023 and adapted to rummy's discrete action space.
+* A **factorial ablation framework** (`eval/ablation.py`) with main
+  effects, pairwise interactions, Holm–Bonferroni correction and a
+  fractional-factorial mode for large factor sets. Every architectural
+  add lands in this framework as a named factor rather than a
+  standalone claim.
+* Two **honest null results** obtained by rigorously testing our own
+  predictions: (a) sampled-BR exploitability breaks under abstraction
+  sharpening, so head-to-head vs uniform is the right yardstick at
+  scale; (b) hand-written cheap-talk listeners do not lift partner MI
+  above the random-play baseline in Euchre — coordination requires more
+  than infrastructure.
 
 ---
 
