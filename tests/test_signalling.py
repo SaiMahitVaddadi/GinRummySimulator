@@ -173,6 +173,7 @@ def test_run_signalling_end_to_end_writes_jsonl(tmp_path):
         "cooperative",
         "byzantine",
         "closed_loop",
+        "closed_loop_search",
     }
     lines = out.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1 + len(results)  # config + treatments
@@ -189,4 +190,5 @@ def test_builders_registered_for_all_treatments():
         "cooperative",
         "byzantine",
         "closed_loop",
+        "closed_loop_search",
     }

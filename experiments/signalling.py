@@ -66,11 +66,21 @@ from gin_rummy.comms.euchre_signals import (
     EuchreListeningPolicy,
     EuchreTalkingPolicy,
 )
+from gin_rummy.comms.euchre_search_listener import (
+    ClosedLoopSearchTeam,
+    SearchListeningPolicy,
+)
 from gin_rummy.eval.stats import BootstrapCI, ProportionCI, wilson_ci
 from gin_rummy.variants.euchre import EuchrePolicy, RandomEuchrePolicy
 
 
-Treatment = Literal["silent", "cooperative", "byzantine", "closed_loop"]
+Treatment = Literal[
+    "silent",
+    "cooperative",
+    "byzantine",
+    "closed_loop",
+    "closed_loop_search",
+]
 
 TEAM0_SEATS: tuple[int, ...] = (0, 2)
 
@@ -135,11 +145,41 @@ def _closed_loop_builder(
     ]
 
 
+def _closed_loop_search_builder(
+    rng: random.Random, channel: MessageChannel
+) -> list[EuchrePolicy]:
+    """Talk-and-search-listen on both team-0 seats; team-1 silent random.
+
+    Same wiring as :func:`_closed_loop_builder` but with a
+    :class:`SearchListeningPolicy` in the listener slot instead of the
+    hand-crafted :class:`EuchreListeningPolicy`. See
+    ``gin_rummy.comms.euchre_search_listener`` for the rollout details.
+    """
+    # Draw a deterministic sub-seed from the shared policy RNG so the
+    # search's own reject-sampler is reproducible per game while still
+    # varying with the top-level ``seed``.
+    seed = rng.randrange(1 << 31)
+    listener0, listener2 = ClosedLoopSearchTeam(
+        seat0=RandomEuchrePolicy(rng),
+        seat2=RandomEuchrePolicy(rng),
+        channel=channel,
+        k_samples=32,
+        rng_seed=seed,
+    )
+    return [
+        listener0,
+        RandomEuchrePolicy(rng),
+        listener2,
+        RandomEuchrePolicy(rng),
+    ]
+
+
 BUILDERS: dict[Treatment, PolicyBuilder] = {
     "silent": _silent_builder,
     "cooperative": _cooperative_builder,
     "byzantine": _byzantine_builder,
     "closed_loop": _closed_loop_builder,
+    "closed_loop_search": _closed_loop_search_builder,
 }
 
 
@@ -212,7 +252,7 @@ def _play_one(
     listener_plays = 0
     listener_conditioned = 0
     for p in policies:
-        if isinstance(p, EuchreListeningPolicy):
+        if isinstance(p, (EuchreListeningPolicy, SearchListeningPolicy)):
             listener_plays += p.plays_total
             listener_conditioned += p.plays_signal_conditioned
 
@@ -339,6 +379,7 @@ def run_signalling(
         "cooperative",
         "byzantine",
         "closed_loop",
+        "closed_loop_search",
     ),
     output_path: Path | None = None,
 ) -> list[TreatmentResult]:
@@ -375,10 +416,10 @@ def run_signalling(
 
 def _format_table(results: Sequence[TreatmentResult]) -> str:
     header = (
-        f"{'treatment':<14}{'games':>6}{'wins':>6}{'losses':>7}"
+        f"{'treatment':<20}{'games':>6}{'wins':>6}{'losses':>7}"
         f"{'win rate (Wilson 95%)':>26}"
         f"{'partner MI [95% CI]':>30}{'sig/game':>10}"
-        f"{'listener fired':>18}"
+        f"{'listener fired':>22}"
     )
     lines = [header, "-" * len(header)]
     for r in results:
@@ -397,10 +438,10 @@ def _format_table(results: Sequence[TreatmentResult]) -> str:
             else "n/a"
         )
         lines.append(
-            f"{r.treatment:<14}{r.n_games:>6}{r.team0_wins:>6}"
+            f"{r.treatment:<20}{r.n_games:>6}{r.team0_wins:>6}"
             f"{r.team0_losses:>7}{wilson:>26}{mi:>30}"
             f"{r.signals_per_game:>10.2f}"
-            f"{listener_cell:>18}"
+            f"{listener_cell:>22}"
         )
     return "\n".join(lines)
 

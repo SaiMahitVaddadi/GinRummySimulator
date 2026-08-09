@@ -1,0 +1,35 @@
+Composite ablation (FRACTIONAL half-fraction, 8 cells, 80 games/cell, resolution=IV, opponent=random, elapsed=24.3s)
+
+Main effects  (design=fractional-IV, opponent=random)
+factor               level                    assigns   games  win% (H2H)           95% CI  win% (incl draws)           95% CI
+-------------------------------------------------------------------------------------------------------------------------
+discard              random                         4     320       88.9%   [ 56.5,  98.0]               2.5%   [  1.3,   4.9]
+discard              highest_deadwood               4     320      100.0%   [ 98.3, 100.0]              69.7%   [ 64.4,  74.5]
+knock                wait_for_gin                   4     320      100.0%   [ 94.5, 100.0]              20.6%   [ 16.6,  25.4]
+knock                always                         4     320       99.4%   [ 96.7,  99.9]              51.6%   [ 46.1,  57.0]
+wrapper              bare                           4     320      100.0%   [ 96.8, 100.0]              35.9%   [ 30.9,  41.3]
+wrapper              voting3                        4     320       99.1%   [ 95.3,  99.8]              36.2%   [ 31.2,  41.7]
+moe                  flat                           4     320       99.1%   [ 95.3,  99.8]              35.9%   [ 30.9,  41.3]
+moe                  phase_gated                    4     320      100.0%   [ 96.8, 100.0]              36.2%   [ 31.2,  41.7]
+
+Factor ranking by |max - min| marginal win rate:
+  discard              span= 11.1pp
+  moe                  span=  0.9pp
+  wrapper              span=  0.9pp
+  knock                span=  0.6pp
+
+Pairwise interactions  (Holm-Bonferroni across all pairs)
+A x B                             magnitude    p-raw   p-holm  reject
+------------------------------------------------------------------------
+discard x knock                       88.9pp    0.000    0.000     yes
+discard x wrapper                     20.0pp    0.754    1.000      no
+discard x moe                         20.0pp    1.000    1.000      no
+wrapper x moe                          2.6pp    0.000    0.000     yes
+knock x moe                            1.2pp    0.754    1.000      no
+knock x wrapper                        1.2pp    1.000    1.000      no
+
+Main-effect sign agreement (FULL vs FRACTIONAL):
+  discard     full_delta=+67.8pp  frac_delta=+67.2pp  agree=yes
+  knock       full_delta=+30.6pp  frac_delta=+30.9pp  agree=yes
+  wrapper     full_delta= +0.3pp  frac_delta= +0.3pp  agree=yes
+  moe         full_delta= +0.3pp  frac_delta= +0.3pp  agree=yes

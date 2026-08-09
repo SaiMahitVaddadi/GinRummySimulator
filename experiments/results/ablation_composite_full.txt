@@ -1,0 +1,29 @@
+Composite ablation (FULL 2^4 = 16 cells, 80 games/cell, 4 factors, opponent=random, elapsed=48.6s)
+
+Main effects  (design=full, opponent=random)
+factor               level                    assigns   games  win% (H2H)           95% CI  win% (incl draws)           95% CI
+-------------------------------------------------------------------------------------------------------------------------
+discard              random                         8     640       86.7%   [ 62.1,  96.3]               2.0%   [  1.2,   3.4]
+discard              highest_deadwood               8     640      100.0%   [ 99.1, 100.0]              69.8%   [ 66.2,  73.3]
+knock                wait_for_gin                   8     640       99.2%   [ 95.9,  99.9]              20.6%   [ 17.7,  23.9]
+knock                always                         8     640       99.7%   [ 98.3,  99.9]              51.2%   [ 47.4,  55.1]
+wrapper              bare                           8     640      100.0%   [ 98.4, 100.0]              35.8%   [ 32.2,  39.6]
+wrapper              voting3                        8     640       99.1%   [ 96.9,  99.8]              36.1%   [ 32.5,  39.9]
+moe                  flat                           8     640       99.1%   [ 96.9,  99.8]              35.8%   [ 32.2,  39.6]
+moe                  phase_gated                    8     640      100.0%   [ 98.4, 100.0]              36.1%   [ 32.5,  39.9]
+
+Factor ranking by |max - min| marginal win rate:
+  discard              span= 13.3pp
+  moe                  span=  0.9pp
+  wrapper              span=  0.9pp
+  knock                span=  0.4pp
+
+Pairwise interactions  (Holm-Bonferroni across all pairs)
+A x B                             magnitude    p-raw   p-holm  reject
+------------------------------------------------------------------------
+discard x knock                       92.9pp    0.000    0.000     yes
+discard x moe                         25.0pp    0.890    1.000      no
+discard x wrapper                     22.2pp    0.892    1.000      no
+wrapper x moe                          1.7pp    1.000    1.000      no
+knock x wrapper                        0.9pp    0.888    1.000      no
+knock x moe                            0.9pp    0.885    1.000      no

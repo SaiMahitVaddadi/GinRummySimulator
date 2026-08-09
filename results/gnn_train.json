@@ -1,0 +1,84 @@
+{
+  "args": {
+    "num_games": 400,
+    "max_rows": 2000,
+    "epochs": 5,
+    "batch_size": 32,
+    "lr": 0.001,
+    "hidden_dim": 64,
+    "heads": 4,
+    "val_frac": 0.1,
+    "eval_games": 200,
+    "seed": 0,
+    "trajectory_path": "data/gnn_trajectories.jsonl",
+    "checkpoint_path": "checkpoints/gnn_sft.pt",
+    "results_path": "results/gnn_train.json"
+  },
+  "num_train": 1800,
+  "num_val": 200,
+  "epoch_stats": [
+    {
+      "epoch": 1,
+      "train_loss": 1.8392819849650066,
+      "val_loss": 1.23149615945018,
+      "val_discard_acc": 0.7555555555555555,
+      "val_draw_acc": 0.8173076923076923,
+      "val_knock_acc": 1.0
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.9446667851342095,
+      "val_loss": 1.0622590039448097,
+      "val_discard_acc": 0.7777777777777778,
+      "val_draw_acc": 0.8173076923076923,
+      "val_knock_acc": 1.0
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.898264291551378,
+      "val_loss": 1.0546640850260156,
+      "val_discard_acc": 0.7666666666666667,
+      "val_draw_acc": 0.8173076923076923,
+      "val_knock_acc": 1.0
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.8955678049723307,
+      "val_loss": 1.048348004563586,
+      "val_discard_acc": 0.8,
+      "val_draw_acc": 0.8173076923076923,
+      "val_knock_acc": 1.0
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.8794839142428504,
+      "val_loss": 1.011852705099286,
+      "val_discard_acc": 0.7888888888888889,
+      "val_draw_acc": 0.8173076923076923,
+      "val_knock_acc": 1.0
+    }
+  ],
+  "checkpoint_path": "checkpoints/gnn_sft.pt",
+  "head_to_head": {
+    "vs_greedy": {
+      "opponent": "greedy",
+      "games": 200,
+      "learner_wins": 63,
+      "opponent_wins": 122,
+      "draws": 15,
+      "win_rate": 0.315,
+      "ci_lower": 0.25462218077944276,
+      "ci_upper": 0.38235084141033604
+    },
+    "vs_random": {
+      "opponent": "random",
+      "games": 200,
+      "learner_wins": 176,
+      "opponent_wins": 0,
+      "draws": 24,
+      "win_rate": 0.88,
+      "ci_lower": 0.8276563857409517,
+      "ci_upper": 0.9180206497611246
+    }
+  }
+}

@@ -484,6 +484,8 @@ def train_gin_cfr(
     seed: int = 0,
     progress: Callable[[int], None] | None = None,
     sampling: str = "outcome",
+    regularisation_lambda: float = 0.0,
+    min_prob: float = 0.0,
 ) -> AverageStrategy:
     """Train MCCFR on abstracted Classic Gin.
 
@@ -491,9 +493,27 @@ def train_gin_cfr(
     :class:`ExternalSamplingMCCFR`); external sampling is infeasible at
     Classic-Gin depth (see module docstring). Returns the average
     strategy over ``iterations`` MCCFR sweeps.
+
+    Parameters
+    ----------
+    regularisation_lambda : float
+        KL-to-uniform regularisation on the average-strategy update.
+        See :class:`ExternalSamplingMCCFR` for semantics. Introduced
+        to counter PAPER.md §6 prediction #3 (average policy
+        concentrates near-deterministic; sampled-BR exploitability rises
+        as training progresses).
+    min_prob : float
+        Floor on every action probability in the returned average
+        strategy.
     """
     engine = ClassicGinEngine()
-    solver = ExternalSamplingMCCFR(seed=seed, engine=engine, sampling=sampling)
+    solver = ExternalSamplingMCCFR(
+        seed=seed,
+        engine=engine,
+        sampling=sampling,
+        regularisation_lambda=regularisation_lambda,
+        min_prob=min_prob,
+    )
     return solver.train(iterations, seed=seed, progress=progress)
 
 
@@ -697,7 +717,10 @@ def sample_exploitability_curve(
     num_deals: int = 32,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
-) -> list[tuple[int, float]]:
+    regularisation_lambda: float = 0.0,
+    min_prob: float = 0.0,
+    h2h_deals: int = 0,
+) -> list[tuple[int, float]] | list[tuple[int, float, float]]:
     """Train MCCFR to each checkpoint and return sampled exploitability.
 
     Approximation: exploitability is measured via
@@ -717,29 +740,73 @@ def sample_exploitability_curve(
         Random deals per exploitability estimate.
     seed : int
         RNG seed for training and estimation.
+    regularisation_lambda, min_prob : float
+        Smoothing knobs forwarded to :class:`ExternalSamplingMCCFR`.
+    h2h_deals : int
+        If ``> 0``, also compute head-to-head-vs-uniform at every
+        checkpoint using this many deals, and return tuples of
+        ``(iters, expl, h2h_vs_uniform)`` instead of ``(iters, expl)``.
 
     Returns
     -------
-    list of (iterations, sampled_exploitability) tuples, in order.
+    List of tuples in order. Shape depends on ``h2h_deals``:
+    ``(iters, expl)`` when 0, ``(iters, expl, h2h)`` otherwise.
     """
     if training_iters is None:
         training_iters = [100, 500, 2000, 10000]
     iters = sorted(set(training_iters))
     engine = ClassicGinEngine()
-    solver = ExternalSamplingMCCFR(seed=seed, engine=engine, sampling="outcome")
+    solver = ExternalSamplingMCCFR(
+        seed=seed,
+        engine=engine,
+        sampling="outcome",
+        regularisation_lambda=regularisation_lambda,
+        min_prob=min_prob,
+    )
+    uniform = AverageStrategy()
     prev = 0
-    out: list[tuple[int, float]] = []
+    out_pair: list[tuple[int, float]] = []
+    out_triple: list[tuple[int, float, float]] = []
     for target in iters:
         step = target - prev
         if step > 0:
             solver.train(step, seed=None)  # continue from current tables
         strat = solver.average_strategy()
         expl = sample_exploitability(strat, num_deals=num_deals, seed=seed)
-        out.append((target, expl))
+        if h2h_deals > 0:
+            h2h = head_to_head_score(strat, uniform, num_deals=h2h_deals, seed=seed)
+            out_triple.append((target, expl, h2h))
+        else:
+            out_pair.append((target, expl))
         if progress is not None:
             progress(target, expl)
         prev = target
-    return out
+    return out_triple if h2h_deals > 0 else out_pair
+
+
+def average_policy_entropy(strat: AverageStrategy) -> float:
+    """Mean Shannon entropy (nats) of the average strategy over info-sets.
+
+    A pure-uniform strategy has ``H = ln(n)`` per info-set; a
+    deterministic strategy has ``H = 0``. Useful for measuring how much
+    the smoothing knobs actually soften the reported policy.
+    """
+    import math
+
+    if not strat.policy:
+        return 0.0
+    total = 0.0
+    for dist in strat.policy.values():
+        s = sum(dist.values())
+        if s <= 0:
+            continue
+        h = 0.0
+        for p in dist.values():
+            q = p / s
+            if q > 0:
+                h -= q * math.log(q)
+        total += h
+    return total / len(strat.policy)
 
 
 __all__ = [
@@ -750,6 +817,7 @@ __all__ = [
     "MAX_TURNS",
     "Phase",
     "apply",
+    "average_policy_entropy",
     "head_to_head_score",
     "information_set",
     "initial_state",

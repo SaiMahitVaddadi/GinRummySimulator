@@ -175,6 +175,8 @@ class ExternalSamplingMCCFR:
         seed: int = 0,
         engine: MCCFREngine | None = None,
         sampling: str = "external",
+        regularisation_lambda: float = 0.0,
+        min_prob: float = 0.0,
     ) -> None:
         """Trainer.
 
@@ -192,12 +194,37 @@ class ExternalSamplingMCCFR:
             per node — used for games where the game tree is too deep
             for external sampling (e.g. abstracted Classic Gin with 4-way
             discard branching and 12+ half-turns).
+        regularisation_lambda : float
+            KL-to-uniform regularisation weight in ``[0, 1]``. When
+            ``> 0``, the *average-strategy accumulator* is updated with a
+            blended distribution
+            ``pi_reg = (1 - lambda) * regret_matching(regrets) + lambda * uniform``
+            instead of the raw regret-matching strategy. This prevents
+            the average policy from becoming near-deterministic and
+            therefore easier to exploit by a state-aware best responder
+            (see PAPER.md §6 prediction #3). Regret updates still use
+            the un-blended regret-matching strategy so convergence
+            properties of MCCFR are preserved; only the *reported*
+            average strategy is softened.
+        min_prob : float
+            After averaging strategies, floor every action probability
+            at ``min_prob`` and renormalise. A cheap alternative /
+            complement to KL regularisation. ``0.0`` disables. Applied
+            in :meth:`average_strategy`.
         """
         self.rng = random.Random(seed)
         self.engine: MCCFREngine = engine if engine is not None else _minigin_engine()
         if sampling not in ("external", "outcome"):
             raise ValueError(f"Unknown sampling scheme: {sampling!r}")
+        if not 0.0 <= regularisation_lambda <= 1.0:
+            raise ValueError(
+                f"regularisation_lambda must be in [0, 1], got {regularisation_lambda}"
+            )
+        if min_prob < 0.0:
+            raise ValueError(f"min_prob must be >= 0, got {min_prob}")
         self.sampling = sampling
+        self.regularisation_lambda = float(regularisation_lambda)
+        self.min_prob = float(min_prob)
         # info_set -> {action: cumulative regret}
         self.regrets: dict[str, dict[Any, float]] = {}
         # info_set -> {action: cumulative strategy weight}
@@ -215,6 +242,21 @@ class ExternalSamplingMCCFR:
             p = 1.0 / len(legal)
             return {a: p for a in legal}
         return {a: v / s for a, v in pos.items()}
+
+    def _reg_blended(self, strategy: dict[Any, float]) -> dict[Any, float]:
+        """Blend a regret-matching strategy toward uniform for the average.
+
+        When ``regularisation_lambda == 0`` this is the identity. When
+        ``> 0`` we return
+        ``(1 - lambda) * strategy + lambda * uniform_over_legal``.
+        Only affects what is accumulated into ``strategy_sum`` (i.e.
+        the reported average). Regret updates still use ``strategy``.
+        """
+        lam = self.regularisation_lambda
+        if lam <= 0.0 or not strategy:
+            return strategy
+        u = 1.0 / len(strategy)
+        return {a: (1.0 - lam) * p + lam * u for a, p in strategy.items()}
 
     # ------------------------------------------------------------------
     # Main traversal
@@ -249,9 +291,10 @@ class ExternalSamplingMCCFR:
                 node_util += strategy[a] * utils[a]
             regret_table = self.regrets.setdefault(info_set, {})
             strat_table = self.strategy_sum.setdefault(info_set, {})
+            accum = self._reg_blended(strategy)
             for a in legal:
                 regret_table[a] = regret_table.get(a, 0.0) + (utils[a] - node_util)
-                strat_table[a] = strat_table.get(a, 0.0) + strategy[a]
+                strat_table[a] = strat_table.get(a, 0.0) + accum[a]
             return node_util
         else:
             # Opponent: sample one action from their current strategy.
@@ -259,7 +302,8 @@ class ExternalSamplingMCCFR:
             # Accumulate opponent's strategy too so the average strategy has
             # entries for every reached info-set (helps best-response).
             strat_table = self.strategy_sum.setdefault(info_set, {})
-            for act, prob in strategy.items():
+            accum = self._reg_blended(strategy)
+            for act, prob in accum.items():
                 strat_table[act] = strat_table.get(act, 0.0) + prob
             return self._traverse(eng.apply(state, a), traverser)
 
@@ -332,6 +376,8 @@ class ExternalSamplingMCCFR:
             w = child_util * pi_opponent
             regret_table = self.regrets.setdefault(info_set, {})
             strat_table = self.strategy_sum.setdefault(info_set, {})
+            accum = self._reg_blended(strategy)
+            reach_wt = pi_traverser / max(sample_prob, 1e-12)
             for act in legal:
                 if act == a:
                     regret_table[act] = regret_table.get(act, 0.0) + w * (1.0 - s_a)
@@ -339,15 +385,14 @@ class ExternalSamplingMCCFR:
                     regret_table[act] = regret_table.get(act, 0.0) - w * s_a
                 # Weighted-average strategy: use pi_traverser as the
                 # reach weight (OS variant of CFR+).
-                strat_table[act] = strat_table.get(act, 0.0) + (
-                    pi_traverser / max(sample_prob, 1e-12)
-                ) * strategy[act]
+                strat_table[act] = strat_table.get(act, 0.0) + reach_wt * accum[act]
             return child_util
         else:
             # Opponent decision node: sample one action, accumulate its
             # strategy for the average.
             strat_table = self.strategy_sum.setdefault(info_set, {})
-            for act, prob in strategy.items():
+            accum = self._reg_blended(strategy)
+            for act, prob in accum.items():
                 strat_table[act] = strat_table.get(act, 0.0) + prob
             return self._traverse_outcome(
                 eng.apply(state, a),
@@ -382,18 +427,49 @@ class ExternalSamplingMCCFR:
 
     def average_strategy(self) -> AverageStrategy:
         avg = AverageStrategy()
+        floor = self.min_prob
         for iset, table in self.strategy_sum.items():
             total = sum(table.values())
             if total <= 0:
-                avg.policy[iset] = {a: 1.0 / len(table) for a in table}
+                dist = {a: 1.0 / len(table) for a in table}
             else:
-                avg.policy[iset] = {a: v / total for a, v in table.items()}
+                dist = {a: v / total for a, v in table.items()}
+            avg.policy[iset] = _apply_min_prob(dist, floor)
         return avg
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _apply_min_prob(
+    dist: dict[Any, float], floor: float
+) -> dict[Any, float]:
+    """Guarantee every action prob is ``>= floor`` and the sum is 1.
+
+    Uses the standard convex construction
+    ``p'_a = floor + (1 - n * floor) * p_a`` where ``p_a`` is the
+    original (already normalised) probability. This is equivalent to
+    mixing ``dist`` with ``uniform`` at weight ``n * floor``.
+
+    If ``floor <= 0`` or the distribution is empty, returns the input
+    unchanged. If ``floor * n >= 1`` the result is uniform.
+    """
+    if floor <= 0.0 or not dist:
+        return dist
+    n = len(dist)
+    if floor * n >= 1.0:
+        p = 1.0 / n
+        return {a: p for a in dist}
+    total = sum(dist.values())
+    if total <= 0.0:
+        p = 1.0 / n
+        return {a: p for a in dist}
+    # Normalise defensively, then mix with uniform.
+    norm = {a: p / total for a, p in dist.items()}
+    keep = 1.0 - n * floor  # in (0, 1)
+    return {a: floor + keep * p for a, p in norm.items()}
 
 
 def _sample_from(dist: dict[Any, float], rng: random.Random) -> Any:
