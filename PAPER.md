@@ -245,6 +245,286 @@ Beyond the composite factorial, per-add status:
 * Byzantine partner (arXiv:2606.07790): a single lying agent should
   visibly collapse the coordination score.
 
+### 5e. Exhaustive ablation catalogue
+
+Because every architectural add has to earn its keep against the very
+large observed effects of the heuristic sub-rules, the paper commits
+to running each of the following as a named factor in either a full
+factorial (small factor count) or a resolution-III / IV fractional
+design (large factor count, per Box & Hunter). All entries are
+already scaffolded in the codebase; each Level is *concretely
+implemented* today unless flagged **[stub]** or **[needs credentials]**
+or **[needs GPU]**. Costs are wall-clock at 200 games per pairing on
+a laptop CPU unless otherwise noted.
+
+Legend for the **Status** column:
+- ✅ = observed numbers in `experiments/results/`
+- 🔧 = code shipped, one CLI invocation from running
+- 🕓 = code shipped, requires external resource (API key, GPU, dataset)
+- 💭 = design in the codebase, implementation pending
+
+---
+
+#### 5e.i · Heuristic-decomposition factors
+
+The `ComposableHeuristicPolicy` accepts any (draw, discard, knock)
+triple from `policies/heuristic_components.py`. All levels
+below are already named functions.
+
+| # | Factor | Levels | Impl (file:symbol) | Cost | Status |
+|---|--------|--------|--------------------|------|--------|
+| H1 | `draw` | `random`; `deck_only`; `smart_if_reduces_deadwood` | `heuristic_components.py:draw_random / draw_always_deck / draw_if_reduces_deadwood` | µs / decision | ✅ (20 pp main) |
+| H2 | `discard` | `random`; `highest_deadwood`; `lowest_deadwood` (null baseline); `safe_from_opp` **[stub — needs a card-tracker to separate from highest_deadwood]** | `heuristic_components.py:discard_*` | µs / decision | ✅ (67.8 pp main) |
+| H3 | `knock` | `never`; `always_when_legal`; `knock_below(k)` for k ∈ {5, 8, 10}; `knock_after_turn(t)` for t ∈ {5, 10, 20} | `heuristic_components.py:knock_never / knock_asap / knock_below / knock_after_turn` | µs / decision | ✅ for 2 levels (30.6 pp main); 🔧 for parametric sweeps |
+
+Priority interactions to characterise: **H2 × H3** (already 92.9 pp,
+Holm p < 0.001 in the 2⁴ composite). H1 × H3 and H1 × H2 are
+statistically null at N = 1280 games; report as evidence that draw
+rule is orthogonal to the other two.
+
+---
+
+#### 5e.ii · Ensemble & MoE factors
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| E1 | `wrapper` | `bare`; `voting3`; `voting7`; `confidence_weighted` | `eval/ensemble.py:VotingEnsemble, ConfidenceWeightedEnsemble` | n × base cost | ✅ voting3 (0.3 pp over identical experts); 🔧 for diverse expert pools |
+| E2 | `moe` | `flat`; `phase_gated`(early/mid/late split @ turns 8, 20); `hand_strength_gated`(dw ≤ 25 → careful, else cheap) | `eval/ensemble.py:PhaseGatedMoE, HandStrengthGatedMoE` | 1× base | ✅ flat vs phase_gated (0.3 pp with identical experts); 🔧 with diverse experts |
+| E3 | `seed_ensemble` | k ∈ {1, 3, 5, 10} independent-seed copies of any base policy | `eval/ensemble.py:seed_ensemble` | k × base cost | 🔧 |
+| E4 | `moe_expert_diversity` | homogeneous (all greedy) vs. heterogeneous {greedy, LLM, GNN} | build_fn composes | mixed | 🔧 (blocked on §5e.iv or §5e.vii being trained) |
+
+Priority interactions: E1 × E4 (does voting help when experts
+actually differ?), E2 × H3 (does phase-gated routing dominate
+knock-timing? — hypothesis: no, because H3 already dominates).
+
+---
+
+#### 5e.iii · CFR & equilibrium-finding factors
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| C1 | `cfr_variant` | tabular external-sampling MCCFR; outcome sampling; vanilla CFR; **CFR+** [💭]; **Discounted-CFR (α, β, γ)** [💭] | `solvers/cfr.py:ExternalSamplingMCCFR / OutcomeSamplingMCCFR` | seconds–minutes | ✅ external & outcome |
+| C2 | `iterations` | 100; 500; 2 000; 5 000; 10 000; 50 000 | trainer arg | linear in iter | ✅ full curve on mini-gin (`cfr_curve.py`) |
+| C3 | `variant_scale` | mini-gin (12 cards, 88 k info-sets); abstracted Classic Gin (~1.6 k info-sets); full Classic Gin **[💭 abstraction too coarse to be sound]** | `solvers/minigin.py` / `solvers/gin_cfr.py` | 20 s / 3 min / intractable | ✅ mini-gin & abstracted; 💭 unabstracted |
+| C4 | `abstraction_bucketing` | HandBucket = (dw × longest_run × num_sets × top_class); PublicBucket = (top_discard_class × deck_size) — 4 alternative bucketings enumerated in `abstraction.py` [🔧] | `solvers/abstraction.py` | same order | ✅ one bucketing; 🔧 for alternatives |
+| C5 | `smoothing` | none; **λ = 0.1 KL-to-uniform** on avg-strategy; min_prob = 0.02 floor; both together | `solvers/cfr.py:regularisation_lambda, min_prob` | same | ✅ 4-config sweep |
+| C6 | `best_response_type` | tabular BR (mini-gin only); sampled BR (n_deals ∈ {32, 100, 500}); learned BR (Timbers IJCAI 2022) [💭] | `solvers/best_response.py` | seconds | ✅ tabular & sampled |
+
+Priority interactions: **C3 × C5** (does smoothing rescue sampled-BR
+exploitability at abstracted scale? — early evidence: yes for λ=0.1).
+C1 × C2 (does CFR+ converge faster than MCCFR at the same
+iteration budget?).
+
+---
+
+#### 5e.iv · LLM policy factors
+
+Every level below flows through `LiteLLM` so the same policy code runs
+against any provider. Costs are per-decision at temperature 0.2, max
+200 output tokens.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| L1 | `model_family` (frontier proprietary) | `openai/gpt-4o-mini`, `openai/gpt-4o`, `openai/o1-mini`, `openai/o4-mini`, `anthropic/claude-haiku-4-5`, `anthropic/claude-sonnet-4-5`, `anthropic/claude-opus-4-1`, `google/gemini-2.5-flash`, `google/gemini-2.5-pro` | `policies/llm.py:LLMPolicy(model=…)` | $10⁻⁴–$10⁻² / decision, 0.5–5 s | 🕓 (needs credentials) |
+| L2 | `model_family` (open weights) | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.1-70B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`, `deepseek/deepseek-v3`, `mistralai/Mistral-Small-24B` (served via vLLM/Ollama/Together/Fireworks) | same policy; endpoint URL swap | GPU-hours | 🕓 (needs GPU or Together/Fireworks credit) |
+| L3 | `temperature` | 0.0; 0.2 (default); 0.7; 1.0 | `LLMPolicy(temperature=…)` | same | 🔧 |
+| L4 | `system_prompt_variant` | terse-JSON default; “think step-by-step”; “act like a poker pro”; adversarial persona; **≥ 3 variants** to serve as the LLM-analogue of RL seeds (per lmgame-Bench 2025) | `LLMPolicy(system_prompt=…)` | same | 🔧 |
+| L5 | `rationale_request` | off; on (adds `rationale: str` to the JSON schema, extracted into `LLMCall.rationale` for the CoT audit) | `LLMPolicy(request_rationale=True)` | +50–200 tokens / decision | ✅ scaffold; 🕓 for real audit |
+| L6 | `max_tool_calls` | 0 (no tools); 1; 3 (default); 5 | `LLMPolicy(max_tool_calls=…)` | 1–5× base cost | ✅ mock; 🕓 with real LLM |
+| L7 | `fallback_policy` | random; greedy; `wait-for-user` (raise) — controls the noise floor when JSON parse fails or the API errors | `LLMPolicy(fallback=…)` | same | ✅ |
+| L8 | `parse_strictness` | tolerant (default: try to extract JSON from prose); strict-JSON-only | code toggle | same | 🔧 (currently only tolerant) |
+
+Priority interactions: **L1 × L4** (does prompt variance dwarf model
+choice — the emerging worry in the LLM-agent literature?); **L1 × L6**
+(do smaller cheaper models benefit disproportionately from tool
+access?); L5 × behavioural-fingerprint (does adding a rationale
+request *change* the action distribution — a Turpin 2023 replication).
+
+---
+
+#### 5e.v · LLM tool-use factors
+
+The `Tool` dataclass lets any Python function become a callable tool.
+Every LLM decision can invoke up to `max_tool_calls` tools.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| T1 | `meld_analyzer_tool` | off; on (exposes optimal decomposition + per-discard deadwood delta to the model) | `policies/tools.py:meld_analyzer_tool` | +1 tool round-trip per decision | ✅ mocked; 🕓 real LLM |
+| T2 | `discard_regret_tool` | off; on (exposes `xplain.discard_regret_table` to the model) | 💭 (2-line wrap of `xplain.discard_regret_table`) | +1 round trip | 💭 |
+| T3 | `opponent_hand_estimator_tool` | off; on (rank-frequency tracker over the discard pile) | 💭 | +1 round trip | 💭 |
+| T4 | `rollout_regret_tool` | off; on (Monte-Carlo counterfactual for the current decision, budget = 20 rollouts) | 💭 (wrap `xplain.rollout_regret`) | +50–200 ms / decision | 💭 |
+| T5 | `cfr_solver_tool` | off; on (mini-gin only; call the CFR-average-policy for a matched abstracted state) | 💭 | µs | 💭 |
+
+Priority interactions: **T1 × L1** (does the tool close the gap between
+Haiku and Opus?); T1 × T4 (does having both tools help or does the LLM
+just call whichever is cheaper?); T5 × H3 (does the CFR-derived
+knock-timing distribution differ from `knock_asap` — the folk-vs-normative
+test).
+
+---
+
+#### 5e.vi · Fine-tuning factors
+
+All wrappers live in `finetune/trainers.py`; all data flows through
+`finetune/collector.py`. Heavy deps (`transformers`, `peft`, `trl`,
+`bitsandbytes`, `datasets`) are optional.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| F1 | `method` | `sft`; `dpo`; `kto`; `orpo` [💭]; `simpo` [💭]; `grpo`; `rloo` [💭]; API-side `openai_sft`; API-side `openai_dpo`; API-side `openai_rft` (o4-mini) | `trainers.py:run_{sft,dpo,kto,grpo,openai_sft,openai_dpo}` | GPU-hours or $ | ✅ SFT & DPO & KTO & GRPO ship; 🕓 for OpenAI arm |
+| F2 | `peft_method` | `none` (full FT); `lora`; `qlora` (4-bit NF4); `dora`; `adalora` [🔧]; `ia3` [🔧]; `pissa` [🔧]; `vera` [🔧] | `finetune/config.py:PEFTConfig(method=…)` | 1× vs 4× VRAM | ✅ config dataclass; wrappers ship for lora/qlora; others in config only |
+| F3 | `lora_rank` × `alpha` | (8, 16); (16, 32) default; (32, 64); (64, 128) | `PEFTConfig(r=…, alpha=…)` | linear in rank | 🔧 |
+| F4 | `optimizer` | `adamw`; `adamw_8bit`; `paged_adamw_8bit` (default); `lion`; `adafactor`; `schedulefree_adamw`; `muon` [💭] | `finetune/config.py:OptimizerConfig(name=…)` | mostly memory | 🔧 for the first 6 |
+| F5 | `scheduler` | `constant`; `linear` (warmup + linear decay); `cosine` (default); `wsd` (warmup-stable-decay for continual self-play); `constant_with_warmup` | `SchedulerConfig(name=…)` | free | 🔧 |
+| F6 | `batch_size` × `grad_accum` × `epochs` | small (2 × 4 × 1) vs. medium (8 × 4 × 3) vs. large (32 × 4 × 5) | `FineTuneRun(…)` | linear | 🔧 |
+| F7 | `data_source` | greedy-vs-random traces; greedy-vs-greedy traces; LLM-vs-greedy traces; human logs (none available) | `collector.py:DataCollector` + `selfplay.py:run_selfplay` | seconds–minutes | ✅ greedy-vs-random; 🔧 others |
+| F8 | `spin_iterations` | 0 (SFT only); 1; 3 (default); 5 (SPIN loop: current-checkpoint vs. previous-checkpoint DPO iterations) | `selfplay.py:run_selfplay_dpo_iteration` | k × F1 cost | ✅ scaffold; 🕓 full run |
+| F9 | `base_model` | `Qwen2.5-0.5B` (tiny — laptop); `Qwen2.5-3B`; `Qwen2.5-7B`; `Llama-3.1-8B` | `FineTuneRun(base_model=…)` | grows with model | 🔧 |
+
+Priority interactions: **F1 × F7** (does DPO from game outcomes actually
+beat SFT on the same corpus? — the novel claim); F1 × F9 (does GRPO
+benefit more at 7B than at 0.5B?); F2 × F6 (QLoRA + small batch vs.
+LoRA + large batch on same VRAM budget).
+
+---
+
+#### 5e.vii · GNN policy factors
+
+The graph builder in `models/graph.py` is torch-free; the model
+architecture and training loop are in `models/gnn_policy.py` and
+`models/train_gnn.py` under the `gnn` optional extra.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| G1 | `graph_type` | bipartite cards↔candidate-melds (default); pure card-graph with rank/suit edges [💭]; card-player heterogeneous graph [💭] | `models/graph.py:build_hand_graph` | µs | ✅ bipartite |
+| G2 | `layer_type` | GAT (default); GCN; GraphSAGE; GIN; TransformerConv | `models/gnn_policy.py:CardMeldGAT` — swap conv class | same order | 🔧 (one class, swap) |
+| G3 | `n_layers` | 1; 2 (default); 3; 4 | model init arg | linear in layers | 🔧 |
+| G4 | `hidden_dim` | 32; 64 (default); 128; 256 | model init arg | quadratic | 🔧 |
+| G5 | `heads` (GAT-only) | 1; 4 (default); 8 | model init arg | linear | 🔧 |
+| G6 | `training_regime` | SFT on greedy traces (default); PPO self-play [💭 needs `torch_geometric` env]; DouZero-style deep Monte Carlo [💭] | `train_gnn.py:train_sft` | 30 s CPU vs GPU-hours | ✅ SFT only |
+| G7 | `training_corpus_size` | 500; 2 000 (default); 10 000; 100 000 samples | `train_gnn.py:collect_trajectories` | linear | ✅ 2 000; 🔧 sweep |
+| G8 | `evaluator` | vs random; vs greedy (default); vs vote3; vs LLM-frontier | eval pair | seconds–minutes | ✅ vs random & greedy; 🕓 vs LLM |
+
+Priority interactions: **G2 × G7** (does GAT need more data to beat
+GCN, or is architecture orthogonal?); G6 × G2 (does PPO amplify the
+graph-inductive-bias advantage over MLP baselines?); G8 × F9 (matched
+parameter-count comparison: does the small GNN beat a
+similarly-parameter'd fine-tuned Qwen).
+
+---
+
+#### 5e.viii · Signalling & communication factors
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| S1 | `talker_type` | none; structured-enum `EuchreTalkingPolicy`; byzantine (inverted-signal) | `comms/euchre_signals.py` | free | ✅ |
+| S2 | `listener_type` | none; hand-written rule-based; 1-ply search over partner-hand prior; multi-ply search [💭]; learned belief-net listener [💭 needs training] | `comms/euchre_signals.py:EuchreListeningPolicy` + `comms/euchre_search_listener.py:SearchListeningPolicy` | ms per play (search) | ✅ hand-written & 1-ply search; 💭 learned |
+| S3 | `inner_policy` | RandomEuchrePolicy (current); rule-based Euchre expert [💭]; RL-trained Euchre policy [💭]; LLM Euchre policy [💭] | inner arg to listener | varies | ✅ random only; the survey names the "competent inner + multi-ply rollout" as the hypothesised path to MI lift |
+| S4 | `channel_bandwidth` | 1 signal / turn (default); 1 / trick; unlimited natural language [💭] | `comms/channel.py:MessageChannel` | linear | ✅ turn-scoped; 🔧 for other bandwidth policies |
+| S5 | `mi_conditioning` | plain I(A; H_partner); **corrected I(A; H_partner \| H_own, public)** (default; common-cause corrected) | `comms/analyze.py` | free | ✅ |
+| S6 | `treatment` | silent; cooperative_emit; byzantine_emit; closed_loop (hand-written listener); closed_loop_search | `experiments/signalling.py` | seconds | ✅ 5 treatments run |
+| S7 | `partnership_topology` | 2v2 (Euchre); 3-player individual (Indian Rummy variant); 4-player individual [💭] | game class | free | ✅ 2v2 |
+| S8 | `signal_alphabet` | {STRONG_TRUMP, BOWER, WEAK, HAS_ACE, NONE} (default); learned discrete codebook [💭 arXiv:1605.06676 DIAL] | `comms/euchre_signals.py:SignalKind` | free | ✅ static; 💭 learned |
+
+Priority interactions: **S2 × S3** (per PAPER.md §6, prediction #4 needs
+a competent inner + smart listener before MI will lift); S1 × S2 ×
+S3 (three-way, requires many treatments — target the resolution-IV
+half-fraction of the framework); S8 × S3 (learned alphabets over
+learned inner — the DIAL / SAD / OBL programme).
+
+---
+
+#### 5e.ix · Explainability factors
+
+Each is an *analysis switch* over an already-recorded trace; runs
+after the game, no policy change.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| X1 | `introspection_logging` | off; on (log per-turn optimal decomp + per-discard deadwood delta) | `eval/xplain.py:introspect_hand` | µs / turn | ✅ |
+| X2 | `discard_regret_table` | off; on | `eval/xplain.py:discard_regret_table` | µs / discard | ✅ |
+| X3 | `reward_channel_decomp` | off; on (Juozapaitis 2019: {deadwood, meld_formation, knock_bonus}) | `eval/xplain.py:reward_channels` | µs / turn | ✅ |
+| X4 | `behavioral_fingerprint` | off; on (per-policy draw-source / discard-rank / knock-timing histograms) | `eval/xplain.py:fingerprint_from_history` | µs | ✅ |
+| X5 | `rollout_regret` | k ∈ {10, 50, 200} Monte-Carlo counterfactuals per decision | `eval/xplain.py:rollout_regret` | k × 1 game / decision | ✅ |
+| X6 | `llm_cot_audit` | off; on (extract stated knock-threshold from LLM rationale, compare against actual) | `experiments/cot_faithfulness.py` | free during game, extraction post-hoc | ✅ mocked; 🕓 real LLM |
+| X7 | `concept_probe` | off; on (Spearman-correlate `deadwood`, `longest_run`, `opp_knock_risk` at t with final win) [💭] | 💭 | free | 💭 |
+| X8 | `saliency` | off; SHAP; Integrated Gradients — for GNN policy only [💭 needs Captum] | 💭 (Captum optional dep) | ms / decision | 💭 |
+
+Priority interactions: **X6 × L5** (Turpin replication — do CoT
+rationales predict discard behaviour?); X4 × F1 (does DPO shift the
+behavioural fingerprint compared to SFT on the same corpus?); X5 ×
+C1 (does the empirical rollout-regret ranking of actions agree with
+the CFR average-policy ranking on the same info-set?).
+
+---
+
+#### 5e.x · Evaluation-methodology factors (meta-ablations)
+
+Ablate the *ablation methodology* itself — the field's methodological
+choices have real effects on reported numbers (per §4 surveys).
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| M1 | `games_per_pair` | 50; 200 (default); 1 000; 5 000; 10 000 | tournament arg | linear | ✅ |
+| M2 | `paired` | on (default); off | `--paired` flag | +2× (extra half of pairs) | ✅ |
+| M3 | `rating_system` | raw win rate; Wilson CI; Bradley–Terry Elo; Glicko-2 [💭]; TrueSkill [💭] | `eval/rating.py:bradley_terry_ratings` | seconds | ✅ Wilson & BT |
+| M4 | `variance_reduction` | none; paired hands; AIVAT [💭 — needs known-strategy player] | `eval/tournament.py:paired` | seconds | ✅ paired |
+| M5 | `multiple_comparisons` | uncorrected; Bonferroni; Holm–Bonferroni (default); BH-FDR [💭] | `eval/stats.py:holm_bonferroni` | free | ✅ Holm |
+| M6 | `bootstrap_samples` | 1 000; 10 000 (default); 100 000 | `eval/stats.py:bootstrap_ci` | linear | ✅ |
+| M7 | `iqm_vs_mean` | mean; median; IQM (default, rliable) | `eval/stats.py:iqm` | free | ✅ |
+| M8 | `n_seeds` | 1; 3; 5; **10 (paper norm)**; 30 | tournament seed sweep | linear | ✅ |
+| M9 | `kfold` | 3-fold; 5-fold (default); LOO | `eval/kfold.py:opponent_kfold` | k × 1 tournament | ✅ |
+| M10 | `contamination_check` | off; on (LLM only: rule-variant probe — e.g. knock-at-8 rather than knock-at-10) | 💭 (schedule under 5e.iv) | 1 extra run per LLM | 💭 |
+
+Priority interactions: **M1 × M4** (how many hands does paired-hands
+buy you vs. raw? — target: reproduce the ACPC ~2× effective sample
+rule); M3 × M5 (does BT-Elo agree with raw win rate after Holm on
+a many-agent tournament?); M8 × M3 (does the BT-Elo CI shrink at √N?).
+
+---
+
+#### 5e.xi · Federated & DP factors (infrastructure completeness)
+
+Present for completeness with the honest caveat from §7 that a card
+game has no realistic adversary against DP-on-telemetry.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| P1 | `nodes` | 1; 3; 10 concurrent runners aggregating decisions | `federated/aggregator.py:aggregate_telemetry` | free | ✅ |
+| P2 | `dp_epsilon` | ∞ (no DP); 10; 1; 0.1 | `federated/dp.py:dp_mean` | free | ✅ |
+| P3 | `dp_sensitivity` | 1; 5; 10 (per-metric clipping bound) | `federated/dp.py` | free | ✅ |
+| P4 | `sanitised_metric_set` | latency only; latency + parse-fail; full behavioural histogram | `federated/protocol.py:PrivateReport` | free | ✅ |
+
+Priority interactions: essentially none of scientific interest —
+scheduled for future work if a cross-org LLM-cost-sharing use case
+appears.
+
+---
+
+#### 5e.xii · Design totals and feasibility budget
+
+| Family | Factor count | Full-factorial cells | Recommended design |
+|--------|-------------:|---------------------:|-------------------|
+| Heuristic (H) | 3 | 24 (2 × 3 × 4) | full-factorial (~40 s @ N=50 pairings) |
+| Ensemble/MoE (E) | 4 | 96 | resolution-V fractional |
+| CFR (C) | 6 | 1 728 | one-factor-at-a-time (OFAT) baseline sweep |
+| LLM (L) | 8 | 4 608 | resolution-III half-fraction × 3 prompt seeds |
+| Tools (T) | 5 | 32 | full-factorial per LLM |
+| Fine-tune (F) | 9 | ≥ 10 000 | OFAT + expert-curated pairs |
+| GNN (G) | 8 | ≥ 5 000 | resolution-III fractional |
+| Signalling (S) | 8 | 4 608 | resolution-III half-fraction; blocked on S3 |
+| Explain (X) | 8 | 384 | full-factorial (all are analysis switches; free once traces exist) |
+| Meta (M) | 10 | > 10 000 | OFAT only |
+| Federated (P) | 4 | 48 | OFAT |
+
+Every one of these families is enumerable through the same
+`FactorialDesign` / `FractionalFactorialDesign` API (`eval/ablation.py`).
+The framework's guarantee is: **any subset of these factors can be
+declared as an ablation, run, and analysed with main effects,
+Holm-corrected interactions, and IQM + bootstrap CIs in a single
+`run_ablation(...)` call**. That is the contribution the paper is
+staking its methodological claim on.
+
 ---
 
 ## 6. Explicit falsifiable predictions and observed results
