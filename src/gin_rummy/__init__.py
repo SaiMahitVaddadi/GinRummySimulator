@@ -12,6 +12,7 @@ from gin_rummy.variants.hollywood import HollywoodGin, HollywoodResult
 from gin_rummy.variants.indian import IndianRummy
 from gin_rummy.policies.heuristic import GreedyKnockPolicy
 from gin_rummy.policies.llm import LLMPolicy
+from gin_rummy.policies.tools import Tool, meld_analyzer_tool
 
 __version__ = "0.3.0"
 
@@ -34,6 +35,8 @@ __all__ = [
     "RandomPolicy",
     "SUITS",
     "ScoringRules",
+    "Tool",
     "TurnRecord",
+    "meld_analyzer_tool",
     "optimal_decomposition",
 ]

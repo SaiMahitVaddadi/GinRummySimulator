@@ -15,6 +15,16 @@ Modules
   LLM/hybrid agents around a shared game state.
 """
 
+from gin_rummy.comms.analyze import (
+    CoordinationReport,
+    PlaySample,
+    action_bucket,
+    compare_policies,
+    coordination_study,
+    hand_bucket,
+    public_bucket,
+    random_policy_factory,
+)
 from gin_rummy.comms.byzantine import ByzantinePolicy, byzantine_swap
 from gin_rummy.comms.channel import ChatMessage, MessageChannel
 from gin_rummy.comms.metrics import (
@@ -28,11 +38,19 @@ __all__ = [
     "BlackboardOrchestrator",
     "ByzantinePolicy",
     "ChatMessage",
+    "CoordinationReport",
     "MessageChannel",
+    "PlaySample",
     "SignalKind",
     "StructuredSignal",
     "TalkingPolicy",
+    "action_bucket",
     "action_hand_mutual_information",
     "byzantine_swap",
+    "compare_policies",
+    "coordination_study",
+    "hand_bucket",
+    "public_bucket",
+    "random_policy_factory",
     "signal_cooperation_index",
 ]

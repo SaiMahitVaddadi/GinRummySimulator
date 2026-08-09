@@ -35,6 +35,12 @@ from gin_rummy.finetune.config import (
     PEFTConfig,
     SchedulerConfig,
 )
+from gin_rummy.finetune.selfplay import (
+    SelfPlayConfig,
+    outcome_dpo_pairs,
+    run_selfplay,
+    run_selfplay_dpo_iteration,
+)
 
 __all__ = [
     "DataCollector",
@@ -42,5 +48,9 @@ __all__ = [
     "OptimizerConfig",
     "PEFTConfig",
     "SchedulerConfig",
+    "SelfPlayConfig",
     "TrajectorySample",
+    "outcome_dpo_pairs",
+    "run_selfplay",
+    "run_selfplay_dpo_iteration",
 ]
