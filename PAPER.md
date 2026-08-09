@@ -210,7 +210,7 @@ Beyond the composite factorial, per-add status:
 |---|---|
 | **CFR training** (mini-gin) | −22.7 % exploitability from uniform in 5 k iters (`solvers/cfr.py`) |
 | **CFR training** (abstracted Gin) | Sampled-BR exploitability *rises* under strategy sharpening; **head-to-head vs uniform monotonically increases to +0.14 by 10 k iters** — the honest low-variance signal |
-| **CFR smoothing** (KL / min-prob) | Observed 3-way sweep at 5k iters, 1591 info-sets: baseline expl 0.75, H2H +0.15; λ=0.1 KL-reg expl 0.61 (**−19 %**), H2H +0.11; min_prob=0.02 floor expl 0.90 (**+19 %**), H2H +0.12. **Honest trade-off**: KL regularisation reduces exploitability *and* head-to-head; a min-prob floor pushes both the wrong way. The two smoothing knobs do not Pareto-dominate; smoothing is a real dial, not a free lunch |
+| **CFR smoothing** (KL / min-prob) | Observed 4-way sweep at 5k iters, 1591 info-sets: baseline expl 0.75 / H2H +0.15; **λ=0.1 KL-reg expl 0.61 (−19 %) / H2H +0.11 — best config**; min_prob=0.02 floor expl 0.90 (+19 %) / H2H +0.12; both together expl 0.66 / H2H +0.08. **Honest trade-off with a clear winner**: KL regularisation alone is Pareto-superior; min-prob and the combined config both hurt H2H |
 | **LLM tools** | Infra ready (`policies/tools.py` with `meld_analyzer_tool`); frontier-LLM run pending credentials |
 | **Signalling: closed-loop hand-written listener** | Partner MI 0.023 vs silent 0.026 — **hand-written rules do not lift MI** |
 | **Signalling: search-based listener (1-ply expectimax over partner-hand prior)** | Partner MI 0.024, listener fires 11.3 % (vs 7.8 % hand-written) — **still no MI lift**. Coordination gap is robust to listener sophistication under this MI decomposition |
