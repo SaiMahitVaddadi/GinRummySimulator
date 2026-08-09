@@ -1,8 +1,12 @@
-"""CFR solvers for the mini-gin toy variant.
+"""CFR solvers for rummy-family variants.
 
-This subpackage provides the first public CFR solve of a rummy-family
-variant, as motivated in ``minigin.py``. See ``cfr.py`` for the trainer,
-``best_response.py`` for exploitability, and ``minigin.py`` for the game.
+* ``minigin.py`` — a 12-card mini-gin toy variant used for the exact
+  tabular CFR solve.
+* ``cfr.py`` — the shared MCCFR trainer (external + outcome sampling).
+* ``best_response.py`` — sampled exploitability for mini-gin.
+* ``abstraction.py`` — hand/public-state abstraction for 10-card Classic
+  Gin.
+* ``gin_cfr.py`` — MCCFR on abstracted Classic Gin.
 """
 
 from gin_rummy.solvers.best_response import (

@@ -1,0 +1,40 @@
+# Matched-arm experiment (games_per_pair=200, seed=0)
+# Policies included: random, greedy, vote3, phase_moe, hand_moe
+# Skipped: llm (no LLM credentials in environment (set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY and edit experiments/matched_arm.py:_llm_builder to enable))
+
+=== Tournament: ClassicGin · 2000 matches ===
+Policies: random, greedy, vote3, phase_moe, hand_moe
+Games per pair: 200  Paired: True
+
+Cross-play win rates (95% Wilson CI):
+              random     greedy      vote3  phase_moe   hand_moe
+   random:           —       0.0%       0.0%       0.0%       7.1%
+   greedy:      100.0%          —      50.0%      50.0%      92.9%
+    vote3:      100.0%      50.0%          —      50.0%      94.5%
+phase_moe:      100.0%      50.0%      50.0%          —      92.5%
+ hand_moe:       92.9%       7.1%       5.5%       7.5%          —
+
+Bradley–Terry Elo (95% bootstrap CI, anchor 1500):
+  vote3                  1781.8  [ 1753.4,  1819.9]
+  greedy                 1778.4  [ 1748.7,  1816.4]
+  phase_moe              1777.4  [ 1746.3,  1815.9]
+  hand_moe               1322.3  [ 1274.1,  1365.5]
+  random                  840.0  [  728.8,   914.1]
+
+Outcome distribution:
+  knock       87.35%  (1747)
+  draw         7.95%  (159)
+  undercut     4.45%  (89)
+  gin          0.25%  (5)
+
+Turns:            mean= 23.2  [ 22.6,  23.8]
+Loser deadwood:   mean= 42.8  [ 41.7,  44.0]
+
+Per-policy telemetry:
+  name                  decisions    mean ms     p95 ms   parse%   fallback%   tok in   tok out
+  random                    23243      0.001      0.002    0.00%       0.00%        0         0
+  greedy                    15864      0.405      0.651    0.00%       0.00%        0         0
+  vote3                     15354      1.395      2.125    0.00%       0.00%        0         0
+  phase_moe                 15669      0.411      0.678    0.00%       0.00%        0         0
+  hand_moe                  22498      0.243      0.590    0.00%       0.00%        0         0
+

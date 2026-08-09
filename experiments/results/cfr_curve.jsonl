@@ -1,0 +1,5 @@
+{"iterations": 0, "exploitability": 0.6822916666666667, "info_sets": 0, "h2h_vs_uniform": 0.0, "elapsed_s": 37.11258506774902, "label": "uniform_baseline"}
+{"iterations": 100, "exploitability": 0.7494791666666667, "info_sets": 561, "h2h_vs_uniform": 0.05625000000000003, "elapsed_s": 39.28628134727478, "label": "cfr_100"}
+{"iterations": 500, "exploitability": 0.8578125000000001, "info_sets": 895, "h2h_vs_uniform": 0.13766666666666671, "elapsed_s": 45.30243897438049, "label": "cfr_500"}
+{"iterations": 2000, "exploitability": 0.8494791666666666, "info_sets": 1325, "h2h_vs_uniform": 0.11300000000000004, "elapsed_s": 74.12339687347412, "label": "cfr_2000"}
+{"iterations": 10000, "exploitability": 0.9312499999999999, "info_sets": 1796, "h2h_vs_uniform": 0.1084166666666667, "elapsed_s": 240.99106669425964, "label": "cfr_10000"}

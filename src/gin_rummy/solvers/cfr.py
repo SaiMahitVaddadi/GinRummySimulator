@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable, Protocol
 
 from gin_rummy.solvers.minigin import (
     Action,
@@ -46,6 +46,82 @@ from gin_rummy.solvers.minigin import (
     returns,
     sample_deal,
 )
+
+
+# ---------------------------------------------------------------------------
+# Engine adapter protocol
+# ---------------------------------------------------------------------------
+
+
+class MCCFREngine(Protocol):
+    """Minimal callable bundle the MCCFR trainer needs to drive any game.
+
+    The default engine is mini-gin (see ``_minigin_engine`` below). Any other
+    game (e.g. abstracted 10-card Classic Gin) supplies its own concrete
+    implementations of these functions and its own ``DEAL_PHASE`` sentinel.
+
+    Contract:
+        * ``initial_state()`` -> root state (phase == DEAL_PHASE at the root).
+        * ``sample_deal(rng)`` -> post-deal state (chance step).
+        * ``is_terminal(state)`` -> bool.
+        * ``returns(state)`` -> tuple[float, float] for terminal states.
+        * ``legal_actions(state)`` -> non-empty list at any non-terminal
+          non-chance decision node.
+        * ``apply(state, action)`` -> next state.
+        * ``information_set(state, player)`` -> hashable str key.
+        * ``is_chance(state)`` -> True iff this is a chance node the trainer
+          should resolve via ``sample_deal``.
+        * ``current_player(state)`` -> int in {0, 1}.
+    """
+
+    def initial_state(self) -> Any: ...
+    def sample_deal(self, rng: random.Random) -> Any: ...
+    def is_terminal(self, state: Any) -> bool: ...
+    def returns(self, state: Any) -> tuple[float, float]: ...
+    def legal_actions(self, state: Any) -> list[Any]: ...
+    def apply(self, state: Any, action: Any) -> Any: ...
+    def information_set(self, state: Any, player: int) -> str: ...
+    def is_chance(self, state: Any) -> bool: ...
+    def current_player(self, state: Any) -> int: ...
+
+
+@dataclass(frozen=True)
+class _CallableEngine:
+    """Wrap a bag of callables into an ``MCCFREngine``. Used internally."""
+
+    _initial_state: Callable[[], Any]
+    _sample_deal: Callable[[random.Random], Any]
+    _is_terminal: Callable[[Any], bool]
+    _returns: Callable[[Any], tuple[float, float]]
+    _legal_actions: Callable[[Any], list[Any]]
+    _apply: Callable[[Any, Any], Any]
+    _information_set: Callable[[Any, int], str]
+    _is_chance: Callable[[Any], bool]
+    _current_player: Callable[[Any], int]
+
+    def initial_state(self) -> Any: return self._initial_state()
+    def sample_deal(self, rng: random.Random) -> Any: return self._sample_deal(rng)
+    def is_terminal(self, state: Any) -> bool: return self._is_terminal(state)
+    def returns(self, state: Any) -> tuple[float, float]: return self._returns(state)
+    def legal_actions(self, state: Any) -> list[Any]: return self._legal_actions(state)
+    def apply(self, state: Any, action: Any) -> Any: return self._apply(state, action)
+    def information_set(self, state: Any, player: int) -> str: return self._information_set(state, player)
+    def is_chance(self, state: Any) -> bool: return self._is_chance(state)
+    def current_player(self, state: Any) -> int: return self._current_player(state)
+
+
+def _minigin_engine() -> MCCFREngine:
+    return _CallableEngine(
+        _initial_state=initial_state,
+        _sample_deal=sample_deal,
+        _is_terminal=is_terminal,
+        _returns=returns,
+        _legal_actions=legal_actions,
+        _apply=apply,
+        _information_set=information_set,
+        _is_chance=lambda s: s.phase == Phase.DEAL,
+        _current_player=lambda s: s.current_player,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -86,24 +162,52 @@ class AverageStrategy:
 
 
 class ExternalSamplingMCCFR:
-    """Regret & strategy tables for external-sampling MCCFR on mini-gin.
+    """Regret & strategy tables for external-sampling MCCFR.
 
     Only the tables and the recursive traversal live here; the game logic is
-    entirely in ``minigin``.
+    delegated to an ``MCCFREngine`` (mini-gin by default). To run MCCFR on
+    another 2p zero-sum imperfect-information game (e.g. abstracted 10-card
+    Classic Gin), pass a custom engine.
     """
 
-    def __init__(self, seed: int = 0) -> None:
+    def __init__(
+        self,
+        seed: int = 0,
+        engine: MCCFREngine | None = None,
+        sampling: str = "external",
+    ) -> None:
+        """Trainer.
+
+        Parameters
+        ----------
+        seed : int
+            RNG seed.
+        engine : MCCFREngine, optional
+            Game adapter. Defaults to mini-gin.
+        sampling : {"external", "outcome"}
+            Sampling scheme. External sampling enumerates all actions at
+            the traverser's decision nodes (Lanctot et al. 2009); it is
+            the default and matches the mini-gin behaviour. Outcome
+            sampling (see Lanctot et al. 2009, §3.2) samples one action
+            per node — used for games where the game tree is too deep
+            for external sampling (e.g. abstracted Classic Gin with 4-way
+            discard branching and 12+ half-turns).
+        """
         self.rng = random.Random(seed)
+        self.engine: MCCFREngine = engine if engine is not None else _minigin_engine()
+        if sampling not in ("external", "outcome"):
+            raise ValueError(f"Unknown sampling scheme: {sampling!r}")
+        self.sampling = sampling
         # info_set -> {action: cumulative regret}
-        self.regrets: dict[str, dict[Action, float]] = {}
+        self.regrets: dict[str, dict[Any, float]] = {}
         # info_set -> {action: cumulative strategy weight}
-        self.strategy_sum: dict[str, dict[Action, float]] = {}
+        self.strategy_sum: dict[str, dict[Any, float]] = {}
 
     # ------------------------------------------------------------------
     # Regret matching
     # ------------------------------------------------------------------
 
-    def _current_strategy(self, info_set: str, legal: list[Action]) -> dict[Action, float]:
+    def _current_strategy(self, info_set: str, legal: list[Any]) -> dict[Any, float]:
         table = self.regrets.setdefault(info_set, {})
         pos = {a: max(table.get(a, 0.0), 0.0) for a in legal}
         s = sum(pos.values())
@@ -116,30 +220,32 @@ class ExternalSamplingMCCFR:
     # Main traversal
     # ------------------------------------------------------------------
 
-    def _traverse(self, state: MiniGinState, traverser: int) -> float:
+    def _traverse(self, state: Any, traverser: int) -> float:
         """Return the counterfactual value for ``traverser`` from ``state``.
 
         Implements external sampling: the traverser branches on all actions;
         opponent and chance nodes sample one action each.
         """
-        if is_terminal(state):
-            return returns(state)[traverser]
+        eng = self.engine
+        if eng.is_terminal(state):
+            return eng.returns(state)[traverser]
 
         # Chance node: sample one deal outcome.
-        if state.phase == Phase.DEAL:
-            child = sample_deal(self.rng)
+        if eng.is_chance(state):
+            child = eng.sample_deal(self.rng)
             return self._traverse(child, traverser)
 
-        legal = legal_actions(state)
-        info_set = information_set(state, state.current_player)
+        legal = eng.legal_actions(state)
+        cur = eng.current_player(state)
+        info_set = eng.information_set(state, cur)
         strategy = self._current_strategy(info_set, legal)
 
-        if state.current_player == traverser:
+        if cur == traverser:
             # Enumerate all actions, accumulate weighted sum, update regrets.
-            utils: dict[Action, float] = {}
+            utils: dict[Any, float] = {}
             node_util = 0.0
             for a in legal:
-                utils[a] = self._traverse(apply(state, a), traverser)
+                utils[a] = self._traverse(eng.apply(state, a), traverser)
                 node_util += strategy[a] * utils[a]
             regret_table = self.regrets.setdefault(info_set, {})
             strat_table = self.strategy_sum.setdefault(info_set, {})
@@ -155,7 +261,101 @@ class ExternalSamplingMCCFR:
             strat_table = self.strategy_sum.setdefault(info_set, {})
             for act, prob in strategy.items():
                 strat_table[act] = strat_table.get(act, 0.0) + prob
-            return self._traverse(apply(state, a), traverser)
+            return self._traverse(eng.apply(state, a), traverser)
+
+    # ------------------------------------------------------------------
+    # Outcome-sampling MCCFR (single-trajectory variant)
+    # ------------------------------------------------------------------
+
+    def _traverse_outcome(
+        self,
+        state: Any,
+        traverser: int,
+        pi_traverser: float,
+        pi_opponent: float,
+        sample_prob: float,
+    ) -> float:
+        """Outcome-sampling traversal (Lanctot et al. 2009, §3.2).
+
+        Samples a single trajectory per iteration. At every decision node
+        we sample one action and update regrets using importance-weighted
+        counterfactual values. Costs O(game length) per iteration versus
+        external sampling's O(branching^depth). Convergence is slower per
+        iteration but iteration cost is bounded, making this the practical
+        choice for deep games.
+
+        Parameters:
+            pi_traverser: reach probability contribution of the traverser
+                to reach this node under sigma.
+            pi_opponent: reach probability contribution of the opponent
+                (and chance) to reach this node.
+            sample_prob: probability that the current trajectory samples
+                its way to this node.
+        """
+        eng = self.engine
+        if eng.is_terminal(state):
+            return eng.returns(state)[traverser] / max(sample_prob, 1e-12)
+
+        if eng.is_chance(state):
+            child = eng.sample_deal(self.rng)
+            return self._traverse_outcome(
+                child, traverser, pi_traverser, pi_opponent, sample_prob
+            )
+
+        legal = eng.legal_actions(state)
+        cur = eng.current_player(state)
+        info_set = eng.information_set(state, cur)
+        strategy = self._current_strategy(info_set, legal)
+
+        # Epsilon-greedy sampling policy for the traverser (exploration).
+        eps = 0.6 if cur == traverser else 0.0
+        n = len(legal)
+        sampling_dist = {
+            a: (eps / n) + (1.0 - eps) * strategy[a] for a in legal
+        }
+        # Sample one action from sampling_dist.
+        a = _sample_from(sampling_dist, self.rng)
+        p_a = sampling_dist[a]
+        s_a = strategy[a]
+
+        if cur == traverser:
+            child_util = self._traverse_outcome(
+                eng.apply(state, a),
+                traverser,
+                pi_traverser * s_a,
+                pi_opponent,
+                sample_prob * p_a,
+            )
+            # Standard OS regret update: for the sampled action, unit
+            # weight (1 - sigma(a)); for all other actions, -sigma(a).
+            # Multiplied by counterfactual reach and the tail utility.
+            w = child_util * pi_opponent
+            regret_table = self.regrets.setdefault(info_set, {})
+            strat_table = self.strategy_sum.setdefault(info_set, {})
+            for act in legal:
+                if act == a:
+                    regret_table[act] = regret_table.get(act, 0.0) + w * (1.0 - s_a)
+                else:
+                    regret_table[act] = regret_table.get(act, 0.0) - w * s_a
+                # Weighted-average strategy: use pi_traverser as the
+                # reach weight (OS variant of CFR+).
+                strat_table[act] = strat_table.get(act, 0.0) + (
+                    pi_traverser / max(sample_prob, 1e-12)
+                ) * strategy[act]
+            return child_util
+        else:
+            # Opponent decision node: sample one action, accumulate its
+            # strategy for the average.
+            strat_table = self.strategy_sum.setdefault(info_set, {})
+            for act, prob in strategy.items():
+                strat_table[act] = strat_table.get(act, 0.0) + prob
+            return self._traverse_outcome(
+                eng.apply(state, a),
+                traverser,
+                pi_traverser,
+                pi_opponent * s_a,
+                sample_prob * p_a,
+            )
 
     # ------------------------------------------------------------------
     # Public train
@@ -171,8 +371,11 @@ class ExternalSamplingMCCFR:
             self.rng = random.Random(seed)
         for it in range(iterations):
             for traverser in (0, 1):
-                root = initial_state()
-                self._traverse(root, traverser)
+                root = self.engine.initial_state()
+                if self.sampling == "external":
+                    self._traverse(root, traverser)
+                else:
+                    self._traverse_outcome(root, traverser, 1.0, 1.0, 1.0)
             if progress is not None and (it + 1) % max(1, iterations // 10) == 0:
                 progress(it + 1)
         return self.average_strategy()
@@ -193,10 +396,10 @@ class ExternalSamplingMCCFR:
 # ---------------------------------------------------------------------------
 
 
-def _sample_from(dist: dict[Action, float], rng: random.Random) -> Action:
+def _sample_from(dist: dict[Any, float], rng: random.Random) -> Any:
     r = rng.random()
     cum = 0.0
-    last: Action | None = None
+    last: Any = None
     for a, p in dist.items():
         cum += p
         last = a
@@ -220,6 +423,7 @@ def train(iterations: int, seed: int = 0) -> AverageStrategy:
 __all__ = [
     "AverageStrategy",
     "ExternalSamplingMCCFR",
+    "MCCFREngine",
     "train",
     "uniform_strategy",
 ]

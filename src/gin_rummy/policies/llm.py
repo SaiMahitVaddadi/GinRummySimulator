@@ -47,6 +47,11 @@ class LLMCall:
     parsed: Any
     fell_back: bool
     reason: str | None = None
+    rationale: str | None = None
+    # Optional per-decision context that the model saw (populated only for
+    # decisions where the value matters for later audit — currently just the
+    # deadwood at knock time). Kept generic so we can add more later.
+    context: dict[str, Any] | None = None
 
 
 @dataclass
@@ -86,6 +91,15 @@ class LLMPolicy:
     completion_fn: Callable[..., str] | None = None
     tools: list[Tool] | None = None
     max_tool_calls: int = 3
+    request_rationale: bool = False
+    """When True, prompts ask for an extra ``rationale`` field explaining
+    the model's own decision (including e.g. its declared knock threshold).
+    Parsed rationales are stored on the corresponding ``LLMCall`` entry.
+
+    This is off by default to preserve prior behaviour and to avoid the
+    extra tokens for callers who don't want them. See
+    ``experiments/cot_faithfulness.py`` for a consumer.
+    """
     trace: list[LLMCall] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -104,21 +118,27 @@ class LLMPolicy:
     def choose_draw_source(self, obs: Observation) -> DrawSource:
         if obs.top_discard is None:
             return "deck"
-        prompt = _render_draw_prompt(obs)
+        prompt = _render_draw_prompt(obs, include_rationale=self.request_rationale)
         parsed, raw, reason = self._ask(prompt, "draw", obs)
+        rationale = _extract_rationale(parsed)
         if parsed and parsed.get("source") in ("deck", "discard"):
-            self._log(obs, "draw", prompt, raw, parsed, fell_back=False)
+            self._log(obs, "draw", prompt, raw, parsed, fell_back=False, rationale=rationale)
             return parsed["source"]
-        self._log(obs, "draw", prompt, raw, parsed, fell_back=True, reason=reason)
+        self._log(
+            obs, "draw", prompt, raw, parsed, fell_back=True, reason=reason, rationale=rationale
+        )
         assert self.fallback is not None
         return self.fallback.choose_draw_source(obs)
 
     def choose_discard(self, obs: Observation) -> Card:
-        prompt = _render_discard_prompt(obs)
+        prompt = _render_discard_prompt(obs, include_rationale=self.request_rationale)
         parsed, raw, reason = self._ask(prompt, "discard", obs)
+        rationale = _extract_rationale(parsed)
         chosen = _resolve_card(parsed.get("discard") if parsed else None, obs.hand)
         if chosen is not None:
-            self._log(obs, "discard", prompt, raw, parsed, fell_back=False)
+            self._log(
+                obs, "discard", prompt, raw, parsed, fell_back=False, rationale=rationale
+            )
             return chosen
         self._log(
             obs,
@@ -128,17 +148,41 @@ class LLMPolicy:
             parsed,
             fell_back=True,
             reason=reason or "illegal_card",
+            rationale=rationale,
         )
         assert self.fallback is not None
         return self.fallback.choose_discard(obs)
 
     def choose_to_knock(self, obs: Observation, deadwood_value: int) -> bool:
-        prompt = _render_knock_prompt(obs, deadwood_value)
+        prompt = _render_knock_prompt(
+            obs, deadwood_value, include_rationale=self.request_rationale
+        )
         parsed, raw, reason = self._ask(prompt, "knock", obs)
+        rationale = _extract_rationale(parsed)
+        context = {"deadwood_value": deadwood_value, "knock_limit": obs.knock_limit}
         if parsed and isinstance(parsed.get("knock"), bool):
-            self._log(obs, "knock", prompt, raw, parsed, fell_back=False)
+            self._log(
+                obs,
+                "knock",
+                prompt,
+                raw,
+                parsed,
+                fell_back=False,
+                rationale=rationale,
+                context=context,
+            )
             return parsed["knock"]
-        self._log(obs, "knock", prompt, raw, parsed, fell_back=True, reason=reason)
+        self._log(
+            obs,
+            "knock",
+            prompt,
+            raw,
+            parsed,
+            fell_back=True,
+            reason=reason,
+            rationale=rationale,
+            context=context,
+        )
         assert self.fallback is not None
         return self.fallback.choose_to_knock(obs, deadwood_value)
 
@@ -246,6 +290,8 @@ class LLMPolicy:
         *,
         fell_back: bool,
         reason: str | None = None,
+        rationale: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         self.trace.append(
             LLMCall(
@@ -256,6 +302,8 @@ class LLMPolicy:
                 parsed=parsed,
                 fell_back=fell_back,
                 reason=reason,
+                rationale=rationale,
+                context=context,
             )
         )
 
@@ -332,28 +380,60 @@ def _shared_state(obs: Observation) -> str:
     )
 
 
-def _render_draw_prompt(obs: Observation) -> str:
+_RATIONALE_HINT_KNOCK = (
+    'Also include a "rationale" string field (one short sentence) '
+    "explaining the choice — in particular, state the deadwood threshold "
+    'at or below which you would knock (e.g. "I knock at 4 or lower").'
+)
+_RATIONALE_HINT_GENERIC = (
+    'Also include a "rationale" string field (one short sentence) '
+    "explaining the choice."
+)
+
+
+def _render_draw_prompt(obs: Observation, *, include_rationale: bool = False) -> str:
+    reply = 'Reply: {"source": "deck"} or {"source": "discard"}.'
+    if include_rationale:
+        reply = reply + " " + _RATIONALE_HINT_GENERIC
     return (
         f"{_shared_state(obs)}\n{_describe_hand(obs.hand)}\n\n"
-        'Reply: {"source": "deck"} or {"source": "discard"}.'
+        f"{reply}"
     )
 
 
-def _render_discard_prompt(obs: Observation) -> str:
+def _render_discard_prompt(obs: Observation, *, include_rationale: bool = False) -> str:
     hand_list = ", ".join(str(c) for c in obs.hand)
+    reply = 'Reply: {"discard": "<card>"} — the card must be in your hand.'
+    if include_rationale:
+        reply = reply + " " + _RATIONALE_HINT_GENERIC
     return (
         f"{_shared_state(obs)}\n{_describe_hand(obs.hand)}\n"
         f"Legal discards: [{hand_list}]\n\n"
-        'Reply: {"discard": "<card>"} — the card must be in your hand.'
+        f"{reply}"
     )
 
 
-def _render_knock_prompt(obs: Observation, deadwood_value: int) -> str:
+def _render_knock_prompt(
+    obs: Observation, deadwood_value: int, *, include_rationale: bool = False
+) -> str:
+    reply = 'Reply: {"knock": true} or {"knock": false}.'
+    if include_rationale:
+        reply = reply + " " + _RATIONALE_HINT_KNOCK
     return (
         f"{_shared_state(obs)}\n{_describe_hand(obs.hand)}\n"
         f"You may knock: your deadwood is {deadwood_value} ≤ limit {obs.knock_limit}.\n\n"
-        'Reply: {"knock": true} or {"knock": false}.'
+        f"{reply}"
     )
+
+
+def _extract_rationale(parsed: Any) -> str | None:
+    """Return the ``rationale`` field from a parsed reply, if present and a str."""
+    if not isinstance(parsed, dict):
+        return None
+    val = parsed.get("rationale")
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
 
 
 # ---------- parsing ----------
