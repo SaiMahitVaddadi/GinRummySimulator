@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Package requires-python = ">=3.10"; test the ends and the
+        # current default. torch-geometric wheels lag Python 3.13, so
+        # the gnn extra isn't installed in CI — its tests are skipped
+        # via the MissingGNNExtras guard.
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync (dev extra)
+        run: uv sync --extra dev
+
+      - name: Run test suite
+        run: uv run pytest -q --tb=short
+
+  smoke-experiments:
+    name: smoke — run the fast experiments
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync
+        run: uv sync --extra dev
+
+      - name: matched-arm (fast)
+        run: uv run python -c "from experiments.matched_arm import run_matched_arm; run_matched_arm(games_per_pair=6, seed=0, out_dir='/tmp/matched')"
+
+      - name: ablation heuristic (fast)
+        run: uv run python -c "from experiments.ablation_heuristic import run_heuristic_ablation; run_heuristic_ablation(games_per_pair=8, seed=0)" || echo "no fast entrypoint — skipping"
