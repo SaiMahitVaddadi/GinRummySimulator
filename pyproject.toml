@@ -41,7 +41,7 @@ gnn = [
 gin-rummy = "gin_rummy.cli:main"
 
 [project.urls]
-Repository = "https://github.com/svaddadi/GinRummySimulator"
+Repository = "https://github.com/SaiMahitVaddadi/GinRummySimulator"
 
 [build-system]
 requires = ["hatchling"]
