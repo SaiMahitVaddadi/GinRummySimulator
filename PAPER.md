@@ -501,7 +501,100 @@ appears.
 
 ---
 
-#### 5e.xii · Design totals and feasibility budget
+#### 5e.xii · Unsupervised graph-learning factors
+
+The `graph_learning` subpackage runs on top of the same bipartite
+cards↔melds graph as the GNN policy but for *unsupervised discovery*
+rather than a policy head — DeepWalk / node2vec walks over the graph
+produce card embeddings, and behavioural fingerprints over play
+histories cluster policies into families without labels.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| U1 | `walk_type` | uniform DeepWalk (Perozzi 2014); node2vec biased 2nd-order (Grover & Leskovec 2016) | `graph_learning/walk.py`, `node2vec.py` | µs / walk | ✅ |
+| U2 | `walks_per_node × walk_length` | (5, 10); (10, 20) default; (20, 40) | walk args | linear in both | ✅ |
+| U3 | `node2vec_(p, q)` | (1, 1) ≡ DeepWalk; (1, 2) BFS-like; (2, 1) DFS-like; (4, 0.25) | node2vec args | same | ✅ |
+| U4 | `embedding_type` | hashed co-occurrence counts (deterministic, no training); SGNS skip-gram (numpy-optional) | `graph_learning/embeddings.py` | ms–seconds fit | ✅ both |
+| U5 | `embedding_dim` | 16; 32 (default); 64; 128 | embedding arg | linear | ✅ |
+| U6 | `policy_signature_features` | behavioural-only (26 dims); graph-augmented (behavioural ++ avg card-embed over discards) | `graph_learning/policy_signatures.py` | µs | ✅ |
+| U7 | `clustering_algorithm` | k-means++ (default); DBSCAN [💭]; hierarchical [💭] | `graph_learning/clustering.py:kmeans` | fast | ✅ k-means |
+| U8 | `k_selection` | fixed k; silhouette sweep over k ∈ [2, 10]; gap-statistic [💭] | `discover_policy_families(k_range=…)` | k × k-means | ✅ silhouette |
+
+**Observed** (`experiments/graph_learning_demo.py`, 4 seeded policies × 20 games, seed 1729): k-means finds a 2-cluster split at silhouette **0.487** — `GreedyKnockPolicy` alone, the three sloppy-discard variants collapsed together. Graph-augmented signature yields the same partition. **Honest verdict**: k-means separates the *skill regime* but does not resolve the finer knock-timing axis at this data scale — a policy-fingerprint saturation finding. Scaling policies + games would surface k ≥ 3.
+
+Priority interactions: **U6 × U8** (does graph-augmentation change the recovered k?); U4 × U5 (does SGNS beat hashed-cooccurrence at any embedding dim?); U7 × U6 (do density-based clusterers find the sloppy-family sub-structure that k-means missed?).
+
+---
+
+#### 5e.xiii · Hidden Markov Model factors (opponent-hand modelling)
+
+The `markov/hmm.py` module is a full pure-Python HMM (forward /
+backward / Viterbi / Baum-Welch, all log-space to avoid underflow).
+`markov/opponent_hand_hmm.py` specialises it to rummy: hidden state ∈
+{very_weak, weak, medium, strong, gin_ready}, observations ∈
+{draw_source × discard-rank-class} = 8 symbols per turn.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| Y1 | `n_hidden_states` | 3; 5 (default: aligned with hand-strength classes); 7; 10 | `HMM(n_states=…)` | quadratic in states per iter | ✅ |
+| Y2 | `n_observations` | 4 (draw × 2-way rank); 8 (default: draw × 4-way rank); 16 (draw × 8-way rank) | `opponent_hand_hmm.OBSERVATION_ALPHABET` | linear | ✅ |
+| Y3 | `initialisation` | uniform; random with seed; supervised warm-start (label a small labelled set) [💭] | `HMM.random(…)` | free | ✅ random; 💭 warm-start |
+| Y4 | `em_iterations` | 5; 20; **25 (default)**; 50 | `baum_welch(iterations=…)` | linear | ✅ |
+| Y5 | `training_corpus` | 50 games; **200 (default)**; 1 000 | `train(games=…)` | linear | ✅ |
+| Y6 | `evaluation_metric` | held-out per-turn log-likelihood; Viterbi accuracy vs. ground-truth hand-strength; posterior calibration | `opponent_hand_hmm.py` | seconds | ✅ LL & Viterbi acc |
+| Y7 | `opponent_policy` (data-generating) | random; greedy (default); mixed; adversarial LLM [🕓] | game loop | seconds | ✅ greedy |
+
+**Observed** (`experiments/hmm_opponent_demo.py`, 200-train / 50-held-out, seed 20250809, two `GreedyKnockPolicy` seats):
+- Final training log-likelihood: **−1 648.57 total, −1.014 per turn** (monotone increase from −3 500 in 25 EM iterations).
+- Held-out per-turn LL: **−1.029** — trivial generalisation gap.
+- Held-out Viterbi accuracy vs. ground-truth 5-class hand strength: **60.35 %** (242/401), against a **48.12 %** majority-class baseline → **+12 pp signal**.
+- Learned transitions concentrate mass on a persistent "weak" state — matches the domain intuition that greedy discards drift the hand-strength distribution downward.
+
+**Honest verdict**: real signal, modest size. Most of the accuracy comes from correctly labelling the long weak plateau; predicting transitions *into* `strong`/`gin_ready` remains noisy. Signal-to-noise is likely too low to drive policy decisions on its own but is a natural input to a downstream policy net.
+
+Priority interactions: **Y1 × Y2** (does more hidden capacity require more observation resolution?); Y7 × Y6 (does the HMM extract more signal when the opponent is *less* stereotypical?); Y5 × Y4 (sample-efficiency curve of Baum-Welch on this observation space).
+
+---
+
+#### 5e.xiv · Markov chain, absorbing chain, and cascade factors
+
+`markov/chain.py` ships a general discrete-time Markov chain
+(stationary distribution via power iteration; expected hits + mean
+first-passage matrix via pure-Python Gauss elimination).
+`markov/absorbing.py` specialises it: canonical (Q, R) form,
+fundamental matrix N = (I − Q)⁻¹, absorption probabilities B = NR.
+`markov/deck_process.py` models the deck as a Markov process over
+rank-class remaining (independent-draws approximation, explicitly
+flagged). `markov/cascade.py` implements the novel **probabilistic
+chain-reaction cascade** — beam-search over top-k joint-probability
+trajectories through a response model.
+
+| # | Factor | Levels | Impl | Cost | Status |
+|---|--------|--------|------|------|--------|
+| K1 | `chain_state_abstraction` | 4-class hand-strength; 5-class (adds `gin_ready`); parametric (dw ≤ k bucket for k ∈ {5, 10, 15, 20}) | `markov/chain.py` + custom encoder | free once encoded | ✅ 4-class |
+| K2 | `transition_estimator` | MLE (Laplace-smoothed default); Dirichlet-prior Bayesian [💭] | `estimate_chain_from_sequences` | free | ✅ Laplace |
+| K3 | `stationary_solver` | power iteration (default); left-eigendecomposition [💭 numpy] | `.stationary_distribution()` | seconds | ✅ power |
+| K4 | `absorbing_set` | {gin}; {gin, knock}; {gin, knock, draw} | `AbsorbingChain(absorbing_states=…)` | seconds | ✅ all three |
+| K5 | `deck_approximation` | independent-draws Markov (default; empirically calibrated); exact hypergeometric [💭] | `deck_process.DeckDepletionModel` | µs / turn | ✅ independent + exact-hypergeometric for `expected_draws_to_rank` |
+| K6 | `deck_rank_grouping` | 2-class (face vs. non-face); 4-class default (low / mid / high / face); 13-class (per-rank, no grouping) | `DeckDepletionModel(rank_groups=…)` | linear | ✅ 4-class |
+| K7 | `cascade_depth` | 1; 2; 3 (default); 5 | `probabilistic_cascade(depth=…)` | branching in depth | ✅ |
+| K8 | `cascade_top_k` | 1; 3; 5 (default); 20 | `probabilistic_cascade(top_k=…)` | linear | ✅ |
+| K9 | `response_model` | greedy softmax over post-discard deadwood (default); HMM-derived belief-conditioned; LLM-derived [🕓] | `cascade.greedy_response_model` + swap | µs–seconds per node | ✅ greedy softmax; 💭 HMM-conditioned |
+| K10 | `cascade_temperature` | 0.5; 1.0 (default); 2.0 | response-model arg | free | ✅ |
+| K11 | `cascade_value_metric` | joint-probability weighted deadwood-delta (default); expected win-probability delta [💭 requires evaluator] | `cascade.cascade_value` | seconds | ✅ deadwood-delta |
+
+**Observed** (`experiments/markov_demo.py`):
+- **Deck-depletion independence approximation matches empirical** rank-class frequency at turn 30 (500 seeded games): **max absolute error 0.0092**, well inside the √500 sampling noise floor of ≈ 0.045.
+- **Top cascade path from a canonical mid-game state** (depth 3, top-k 5): `P1 discards K♠ → P2 discards J♣ → P1 discards Q♥` — both sides sheddin their highest-value face-card deadwood first, exactly the symmetric "cash the face cards" pattern a competent rummy player would predict.
+- The absorbing chain's expected-turns-to-gin from a `weak` start state matches the empirical simulation within Wilson CI at 500 games (sanity check).
+
+**Honest verdict**: (a) the independence approximation is *good enough* for practical use — the empirical deviation is well below the sampling noise floor of any reasonable experiment size, so per-turn deck-class predictions are trustworthy; (b) the cascade model recovers strategically sensible top paths, which validates the response-model shape but doesn't yet prove it *predicts* opponent behaviour — that requires calibrating against real game trajectories (Y7 × K9 interaction).
+
+Priority interactions: **K5 × K6** (does finer rank grouping hurt the independence approximation?); K7 × K9 (does cascade depth pay off more when the response model is HMM-conditioned rather than context-free softmax?); K11 × Y6 (does the joint probability × deadwood-delta cascade value predict actual game outcomes better than the HMM Viterbi accuracy — a head-to-head comparison of the two probabilistic-model families).
+
+---
+
+#### 5e.xv · Design totals and feasibility budget
 
 | Family | Factor count | Full-factorial cells | Recommended design |
 |--------|-------------:|---------------------:|-------------------|
@@ -516,14 +609,18 @@ appears.
 | Explain (X) | 8 | 384 | full-factorial (all are analysis switches; free once traces exist) |
 | Meta (M) | 10 | > 10 000 | OFAT only |
 | Federated (P) | 4 | 48 | OFAT |
+| Unsupervised graph (U) | 8 | 3 456 | resolution-III fractional |
+| HMM (Y) | 7 | 1 536 | OFAT + one full 2⁷ half-fraction |
+| Markov / cascade (K) | 11 | ≥ 15 000 | OFAT baseline + interaction pairs with Y and G |
 
-Every one of these families is enumerable through the same
-`FactorialDesign` / `FractionalFactorialDesign` API (`eval/ablation.py`).
-The framework's guarantee is: **any subset of these factors can be
-declared as an ablation, run, and analysed with main effects,
-Holm-corrected interactions, and IQM + bootstrap CIs in a single
-`run_ablation(...)` call**. That is the contribution the paper is
-staking its methodological claim on.
+**Total unique factors catalogued: 99** across 14 families, all
+enumerable through the same `FactorialDesign` /
+`FractionalFactorialDesign` API (`eval/ablation.py`). The framework's
+guarantee is: **any subset of these factors can be declared as an
+ablation, run, and analysed with main effects, Holm-corrected
+interactions, and IQM + bootstrap CIs in a single `run_ablation(...)`
+call**. That is the contribution the paper is staking its
+methodological claim on.
 
 ---
 
