@@ -10,15 +10,26 @@ The canonical tool shipped here is :func:`meld_analyzer_tool`, which wraps
 DP in :func:`gin_rummy.meld.optimal_decomposition`). This implements research
 opening #1 from the hybrid-architectures survey: LLM as *meta-controller*,
 optimal-decomposition analyzer as *tactical solver*.
+
+A second tool, :func:`bind_hmm_belief_tool`, exposes a trained
+:class:`OpponentHandHMM` as an *inference oracle* — the LLM can query it for
+a posterior over the opponent's hand-strength class before committing to a
+knock/no-knock decision. Because the HMM needs ambient game context that a
+tool call can't carry (the full turn history and the opponent seat id), the
+binder pattern injects two zero-arg closures at wiring time.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from gin_rummy.cards import RANKS, SUITS, Card
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from gin_rummy.game import TurnRecord
+    from gin_rummy.markov.opponent_hand_hmm import OpponentHandHMM
 
 
 @dataclass
@@ -140,4 +151,141 @@ def meld_analyzer_tool() -> Tool:
     )
 
 
-__all__ = ["Tool", "meld_analyzer_tool"]
+# ---------- opponent-HMM belief tool ----------
+
+
+_HMM_BELIEF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+    "description": (
+        "No arguments. The tool reads the ambient game history and the "
+        "configured opponent seat id from the closures the LLMPolicy was "
+        "wired with."
+    ),
+}
+
+
+def _build_hmm_belief_fn(
+    hmm: "OpponentHandHMM",
+    history_provider: Callable[[], list["TurnRecord"]],
+    target_player_id_provider: Callable[[], int],
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Build the callable that the Tool wraps.
+
+    The returned function ignores its ``args`` payload (the schema declares
+    no arguments) and pulls the ambient game context from the injected
+    closures. This lets tests inject deterministic history/id providers
+    without spinning up a full game engine.
+    """
+
+    # Import locally so this module stays importable without markov deps at
+    # module-load time.
+    from gin_rummy.markov.opponent_hand_hmm import (
+        HAND_STRENGTH_CLASSES,
+        extract_observations,
+    )
+
+    def _run(_args: dict[str, Any]) -> dict[str, Any]:
+        history = history_provider()
+        target_id = target_player_id_provider()
+        try:
+            observations = extract_observations(history, target_id)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"history_extraction_failed: {exc}"}
+        if not observations:
+            return {"error": "insufficient_history"}
+
+        viterbi_states, posteriors = hmm.predict_hand_strength(observations)
+        if not posteriors:
+            return {"error": "insufficient_history"}
+
+        # Posterior at the current (most-recent) turn.
+        current_post = posteriors[-1]
+        n_states = len(current_post)
+        # Guard: only label with semantic class names if the HMM's state
+        # count matches the canonical alphabet. Otherwise fall back to
+        # "s0", "s1", ... — the caller has intentionally chosen a
+        # non-standard state count.
+        if n_states == len(HAND_STRENGTH_CLASSES):
+            names = HAND_STRENGTH_CLASSES
+        else:
+            names = tuple(f"s{i}" for i in range(n_states))
+
+        posterior_named = {names[i]: float(current_post[i]) for i in range(n_states)}
+        current_viterbi = viterbi_states[-1]
+        current_viterbi_name = (
+            names[current_viterbi]
+            if 0 <= current_viterbi < n_states
+            else f"s{current_viterbi}"
+        )
+        confidence = float(max(current_post)) if current_post else 0.0
+
+        return {
+            "posterior": posterior_named,
+            "viterbi_current_state": current_viterbi_name,
+            "confidence": confidence,
+        }
+
+    return _run
+
+
+def bind_hmm_belief_tool(
+    hmm: "OpponentHandHMM",
+    get_history: Callable[[], list["TurnRecord"]],
+    get_target_id: Callable[[], int],
+) -> Tool:
+    """Bind an :class:`OpponentHandHMM` and ambient-context closures to a Tool.
+
+    Parameters
+    ----------
+    hmm:
+        A *trained* :class:`OpponentHandHMM`. The tool does not train — it
+        only calls :meth:`OpponentHandHMM.predict_hand_strength`.
+    get_history:
+        Zero-arg closure returning the current ``list[TurnRecord]`` for the
+        game in progress. Typically wired to a game-engine attribute that
+        accumulates turn records.
+    get_target_id:
+        Zero-arg closure returning the seat id of the *opponent* whose hand
+        strength we want to infer.
+
+    Returns
+    -------
+    Tool
+        A :class:`Tool` named ``"opponent_hmm_belief"`` that takes no
+        arguments and returns a posterior over hand-strength classes.
+    """
+    fn = _build_hmm_belief_fn(hmm, get_history, get_target_id)
+    return Tool(
+        name="opponent_hmm_belief",
+        description=(
+            "Query a trained opponent-hand-strength HMM for the current "
+            "posterior over the opponent's latent hand-strength class "
+            "(very_weak/weak/medium/strong/gin_ready). Returns the "
+            "Viterbi single-best current state, the full posterior "
+            "distribution, and the max-a-posteriori confidence. Call this "
+            "before deciding whether to knock — a high posterior mass on "
+            "strong/gin_ready is a reason to hold off."
+        ),
+        schema=_HMM_BELIEF_SCHEMA,
+        fn=fn,
+    )
+
+
+def opponent_hmm_belief_tool(
+    hmm: "OpponentHandHMM",
+    history_provider: Callable[[], list["TurnRecord"]],
+    target_player_id_provider: Callable[[], int],
+) -> Tool:
+    """Alias for :func:`bind_hmm_belief_tool` matching the name in the
+    module docstring / research spec."""
+    return bind_hmm_belief_tool(hmm, history_provider, target_player_id_provider)
+
+
+__all__ = [
+    "Tool",
+    "bind_hmm_belief_tool",
+    "meld_analyzer_tool",
+    "opponent_hmm_belief_tool",
+]

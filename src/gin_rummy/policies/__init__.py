@@ -21,7 +21,12 @@ from gin_rummy.policies.heuristic_components import (
     knock_never,
 )
 from gin_rummy.policies.llm import LLMPolicy
-from gin_rummy.policies.tools import Tool, meld_analyzer_tool
+from gin_rummy.policies.tools import (
+    Tool,
+    bind_hmm_belief_tool,
+    meld_analyzer_tool,
+    opponent_hmm_belief_tool,
+)
 
 __all__ = [
     "ComposableHeuristicPolicy",
@@ -31,6 +36,7 @@ __all__ = [
     "KnockRule",
     "LLMPolicy",
     "Tool",
+    "bind_hmm_belief_tool",
     "discard_highest_deadwood",
     "discard_lowest_deadwood",
     "discard_random",
@@ -43,4 +49,5 @@ __all__ = [
     "knock_below",
     "knock_never",
     "meld_analyzer_tool",
+    "opponent_hmm_belief_tool",
 ]
