@@ -1,0 +1,5 @@
+{"name": "hand_crafted", "info_sets": 1591, "exploitability": 0.7437499999999999, "h2h_vs_uniform": 0.10683333333333334, "entropy": 0.7149880741688138, "elapsed_s": 167.2638339996338, "k": null}
+{"name": "embed_k=8", "info_sets": 319, "exploitability": 0.818229166666667, "h2h_vs_uniform": 0.07683333333333332, "entropy": 0.7101620561142503, "elapsed_s": 99.22060227394104, "k": 8}
+{"name": "embed_k=16", "info_sets": 618, "exploitability": 0.6802083333333333, "h2h_vs_uniform": 0.07341666666666664, "entropy": 0.7101393907058863, "elapsed_s": 104.37060523033142, "k": 16}
+{"name": "embed_k=32", "info_sets": 1160, "exploitability": 0.5270833333333333, "h2h_vs_uniform": 0.09941666666666663, "entropy": 0.720241145199142, "elapsed_s": 108.23526811599731, "k": 32}
+{"name": "embed_k=64", "info_sets": 2253, "exploitability": 0.778125, "h2h_vs_uniform": 0.03591666666666668, "entropy": 0.7085850019611118, "elapsed_s": 112.85764813423157, "k": 64}

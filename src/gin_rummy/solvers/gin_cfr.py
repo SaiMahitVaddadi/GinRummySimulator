@@ -479,6 +479,91 @@ class ClassicGinEngine:
 # ---------------------------------------------------------------------------
 
 
+def embedding_information_set(
+    bucketer: "object",
+) -> Callable[["GinState", int], str]:
+    """Return an ``info_fn(state, player) -> str`` closed over ``bucketer``.
+
+    Convenience for :func:`sample_exploitability_with_engine` and
+    :func:`head_to_head_score_with_engines`.
+    """
+    def _fn(state: "GinState", player: int) -> str:
+        return _embedding_information_set(state, player, bucketer)
+    return _fn
+
+
+def _embedding_information_set(
+    state: "GinState",
+    player: int,
+    bucketer: "object",
+) -> str:
+    """Info-set key using a learned :class:`EmbeddingHandBucket`.
+
+    Structurally identical to :func:`information_set`, but replaces the
+    hand-crafted :class:`HandBucket` with the bucketer's integer cluster
+    label. The public bucket and phase remain hand-crafted so we compare
+    apples to apples — this study varies **only** the hand fingerprint.
+    """
+    hand = state.hands[player]
+    hb_idx = bucketer.bucket_of(list(hand))  # type: ignore[attr-defined]
+    top = state.discard[-1] if state.discard else None
+    pb = public_bucket(top, len(state.deck))
+    return (
+        f"P{player}|ph{int(state.phase)}|"
+        f"hb_emb{hb_idx}|pb{pb.key()}"
+    )
+
+
+class _EmbeddingBucketEngine(ClassicGinEngine):
+    """ClassicGinEngine variant whose info-set key uses ``bucketer``.
+
+    All game dynamics inherit from :class:`ClassicGinEngine`; only the
+    :meth:`information_set` hook changes. Keeps ``train_gin_cfr`` and
+    :func:`sample_exploitability` reusable side-by-side with the baseline.
+    """
+
+    def __init__(self, bucketer: "object") -> None:
+        self._bucketer = bucketer
+
+    def information_set(self, state: GinState, player: int) -> str:  # type: ignore[override]
+        return _embedding_information_set(state, player, self._bucketer)
+
+
+def train_gin_cfr_embedding(
+    bucketer: "object",
+    iterations: int,
+    seed: int = 0,
+    progress: Callable[[int], None] | None = None,
+    sampling: str = "outcome",
+    regularisation_lambda: float = 0.0,
+    min_prob: float = 0.0,
+) -> AverageStrategy:
+    """Train MCCFR using a learned :class:`EmbeddingHandBucket` bucketer.
+
+    Structural sibling of :func:`train_gin_cfr`; the *only* difference is
+    the info-set key used to look up regret / average-strategy tables.
+    Deliberately does not modify :func:`train_gin_cfr` so U-vs-C
+    comparisons (embedding vs hand-crafted) can share every other knob.
+
+    Parameters — identical to :func:`train_gin_cfr` — plus:
+
+    Parameters
+    ----------
+    bucketer :
+        A fitted :class:`gin_rummy.solvers.embedding_abstraction.EmbeddingHandBucket`
+        (typed loosely to avoid a circular import at module load).
+    """
+    engine = _EmbeddingBucketEngine(bucketer)
+    solver = ExternalSamplingMCCFR(
+        seed=seed,
+        engine=engine,
+        sampling=sampling,
+        regularisation_lambda=regularisation_lambda,
+        min_prob=min_prob,
+    )
+    return solver.train(iterations, seed=seed, progress=progress)
+
+
 def train_gin_cfr(
     iterations: int,
     seed: int = 0,
@@ -784,6 +869,155 @@ def sample_exploitability_curve(
     return out_triple if h2h_deals > 0 else out_pair
 
 
+def _rollout_under_engine(
+    state: GinState,
+    strat: AverageStrategy,
+    rng: random.Random,
+    responder: int,
+    info_fn: Callable[[GinState, int], str],
+) -> float:
+    while not is_terminal(state):
+        cur = state.current_player
+        legal = legal_actions(state)
+        info = info_fn(state, cur)
+        act = _sample_action(strat, info, legal, rng)
+        state = apply(state, act)
+    return returns(state)[responder]
+
+
+def _sampled_br_value_engine(
+    strat: AverageStrategy,
+    responder: int,
+    info_fn: Callable[[GinState, int], str],
+    num_deals: int = 32,
+    rollouts_per_action: int = 2,
+    seed: int = 0,
+) -> float:
+    total = 0.0
+    for i in range(num_deals):
+        rng = random.Random(seed * 7919 + i)
+        state = sample_deal(rng)
+        while not is_terminal(state):
+            cur = state.current_player
+            legal = legal_actions(state)
+            info = info_fn(state, cur)
+            if cur == responder:
+                best_val = float("-inf")
+                best_a = legal[0]
+                for a in legal:
+                    child = apply(state, a)
+                    v = 0.0
+                    for k in range(rollouts_per_action):
+                        rng_k = random.Random(seed * 104729 + i * 97 + hash(a) + k)
+                        v += _rollout_under_engine(child, strat, rng_k, responder, info_fn)
+                    v /= rollouts_per_action
+                    if v > best_val:
+                        best_val = v
+                        best_a = a
+                state = apply(state, best_a)
+            else:
+                act = _sample_action(strat, info, legal, rng)
+                state = apply(state, act)
+        total += returns(state)[responder]
+    return total / num_deals
+
+
+def _sigma_value_engine(
+    strat: AverageStrategy,
+    player: int,
+    info_fn: Callable[[GinState, int], str],
+    num_deals: int = 32,
+    seed: int = 0,
+) -> float:
+    total = 0.0
+    for i in range(num_deals):
+        rng = random.Random(seed * 6151 + i)
+        state = sample_deal(rng)
+        while not is_terminal(state):
+            cur = state.current_player
+            legal = legal_actions(state)
+            info = info_fn(state, cur)
+            act = _sample_action(strat, info, legal, rng)
+            state = apply(state, act)
+        total += returns(state)[player]
+    return total / num_deals
+
+
+def sample_exploitability_with_engine(
+    strat: AverageStrategy,
+    info_fn: Callable[[GinState, int], str],
+    num_deals: int = 32,
+    seed: int = 0,
+    rollouts_per_action: int = 2,
+) -> float:
+    """Sampled exploitability that keys info-sets via ``info_fn``.
+
+    Same semantics as :func:`sample_exploitability`, but the info-set
+    key comes from the caller — so an embedding-trained strategy can be
+    evaluated against its **own** abstraction (rather than the hand-
+    crafted one, which would misroute every lookup and mask real
+    weaknesses).
+    """
+    v0 = _sigma_value_engine(strat, 0, info_fn, num_deals=num_deals, seed=seed + 11)
+    v1 = _sigma_value_engine(strat, 1, info_fn, num_deals=num_deals, seed=seed + 13)
+    br0 = _sampled_br_value_engine(
+        strat, 0, info_fn, num_deals=num_deals,
+        rollouts_per_action=rollouts_per_action, seed=seed + 17,
+    )
+    br1 = _sampled_br_value_engine(
+        strat, 1, info_fn, num_deals=num_deals,
+        rollouts_per_action=rollouts_per_action, seed=seed + 19,
+    )
+    return max(0.0, (br0 - v0) + (br1 - v1))
+
+
+def head_to_head_score_with_engines(
+    strat_a: AverageStrategy,
+    info_fn_a: Callable[[GinState, int], str],
+    strat_b: AverageStrategy,
+    info_fn_b: Callable[[GinState, int], str],
+    num_deals: int = 100,
+    seed: int = 0,
+) -> float:
+    """Head-to-head that keys each player's info-set via its own ``info_fn``.
+
+    Necessary when the two strategies were trained under different
+    abstractions (e.g. embedding vs hand-crafted): each side must look
+    up its own tables using the fingerprint it was trained under.
+    """
+    half = num_deals // 2
+    total = 0.0
+    for i in range(half):
+        rng = random.Random(seed * 4093 + i)
+        state = sample_deal(rng)
+        while not is_terminal(state):
+            cur = state.current_player
+            legal = legal_actions(state)
+            if cur == 0:
+                info = info_fn_a(state, cur)
+                act = _sample_action(strat_a, info, legal, rng)
+            else:
+                info = info_fn_b(state, cur)
+                act = _sample_action(strat_b, info, legal, rng)
+            state = apply(state, act)
+        total += returns(state)[0]
+    for i in range(half):
+        rng = random.Random(seed * 4093 + i + 1_000_003)
+        state = sample_deal(rng)
+        while not is_terminal(state):
+            cur = state.current_player
+            legal = legal_actions(state)
+            if cur == 1:
+                info = info_fn_a(state, cur)
+                act = _sample_action(strat_a, info, legal, rng)
+            else:
+                info = info_fn_b(state, cur)
+                act = _sample_action(strat_b, info, legal, rng)
+            state = apply(state, act)
+        total += returns(state)[1]
+    return total / (2 * half) if half > 0 else 0.0
+
+
 def average_policy_entropy(strat: AverageStrategy) -> float:
     """Mean Shannon entropy (nats) of the average strategy over info-sets.
 
@@ -818,7 +1052,9 @@ __all__ = [
     "Phase",
     "apply",
     "average_policy_entropy",
+    "embedding_information_set",
     "head_to_head_score",
+    "head_to_head_score_with_engines",
     "information_set",
     "initial_state",
     "is_terminal",
@@ -827,5 +1063,7 @@ __all__ = [
     "sample_deal",
     "sample_exploitability",
     "sample_exploitability_curve",
+    "sample_exploitability_with_engine",
     "train_gin_cfr",
+    "train_gin_cfr_embedding",
 ]
