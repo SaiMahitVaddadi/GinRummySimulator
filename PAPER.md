@@ -594,7 +594,97 @@ Priority interactions: **K5 × K6** (does finer rank grouping hurt the independe
 
 ---
 
-#### 5e.xv · Design totals and feasibility budget
+#### 5e.xv · Cross-module interaction studies
+
+Every architectural add in §5e.i–xiv is a *within-family* factor. The
+paper's methodological claim is that the framework composes across
+families. §5e.xv reports the three cross-family interactions the
+codebase now ships end-to-end.
+
+##### Y × K · HMM-conditioned cascade response model
+`markov/hmm_cascade.py:hmm_conditioned_response_model` replaces the
+context-free softmax with `T_eff = T_base / (1 + β · P(strong ∪ gin_ready))`
+— sharpening the softmax when the HMM's posterior over opponent hand
+strength puts mass on the strong states. Baseline vs HMM-conditioned
+at N=200 train / 50 held-out (43 usable snapshots at turn 8):
+
+| model | top-1 accuracy | 95 % Wilson CI | top-5 coverage | 95 % Wilson CI |
+|---|---|---|---|---|
+| baseline (context-free) | 1.000 | [0.918, 1.000] | 0.737 | [0.580, 0.850] |
+| HMM-conditioned (β = 0.5) | 1.000 | [0.918, 1.000] | 0.711 | [0.552, 0.830] |
+
+**Honest verdict: null.** Both saturate at top-1 = 1.000 because the
+`GreedyKnockPolicy` target is *deterministic* — its argmax discard is
+recovered by any near-argmax cascade. The 2.6 pp top-5 coverage gap
+sits well inside overlapping CIs. The mechanism works (a synthetic
+100 % strong-belief injection *does* shift mean discarded-card value
+upward under β = 5), but a deterministic opponent gives it nothing to
+predict. The natural next test is a stochastic opponent (LLMPolicy or
+seed-mixture ensemble); the code already accepts one.
+
+##### U × C · Graph-embedding-augmented CFR bucketing
+`solvers/embedding_abstraction.py:EmbeddingHandBucket` replaces the
+hand-crafted `HandBucket` with k-means over graph-embedding-derived
+hand vectors (SGNS embeddings, dim 16, mean-pool over card + meld
+nodes; corpus 2000, walk config as `graph_learning/walk.py` default).
+5-row sweep at 5 000 MCCFR iterations, KL λ = 0.1 smoothing:
+
+| Config | Info-sets | Exploitability | H2H vs uniform | Entropy |
+|---|---:|---:|---:|---:|
+| `hand_crafted` (baseline) | 1 591 | 0.744 | **+0.107** | 0.715 |
+| `embed_k=8` | 319 | 0.818 | +0.077 | 0.710 |
+| `embed_k=16` | 618 | 0.680 | +0.073 | 0.710 |
+| **`embed_k=32`** | 1 160 | **0.527** | +0.099 | 0.720 |
+| `embed_k=64` | 2 253 | 0.778 | +0.036 | 0.709 |
+
+**Honest verdict: trade-off, not Pareto win.** `embed_k=32` cuts
+sampled exploitability by **29 % vs the hand-crafted baseline (0.744 →
+0.527)** with a 27 % smaller info-set footprint, but loses 0.8 pp on
+H2H vs uniform (+0.099 vs +0.107). Neither metric strictly dominates.
+The exploitability–k curve is U-shaped (min at k=32); k=8 under-fits
+and k=64 over-fragments. This is the first learned-abstraction result
+for a rummy-family CFR agent that we can find in the literature.
+
+##### Y × L · HMM belief injected as an LLM tool
+`policies/tools.py:bind_hmm_belief_tool` registers the trained HMM's
+posterior as a callable tool the `LLMPolicy` can invoke mid-decision.
+Scripted-LLM evaluation (100 ClassicGin games; the scripted policy
+always calls the tool and knocks iff `P(strong ∪ gin_ready) < 0.3`):
+
+| Arm | Win rate | Knock events | Mean knock deadwood | Knock-yes fraction |
+|---|---|---:|---:|---:|
+| Belief-ignored control (always knock) | **0.450** | 47 | 6.57 | 1.000 |
+| Belief-gated (threshold 0.3) | 0.420 | 45 | 7.09 | **0.750** |
+
+**Honest verdict: real behavioural change, small cost.** The belief
+gate *does* alter policy — 25 % of legal knocks are suppressed —
+which is exactly the mechanism the tool was built to test. The 3 pp
+win-rate drop is attributable to over-suppression: the un-calibrated
+HMM's posterior over-assigns "strong" mass in mid-game, so it holds
+off knocks that would have won. The lesson isn't "HMM tool is bad";
+it's **"HMM posteriors need calibration before the tool becomes net-positive"**
+— arguably the most useful actionable finding of the three studies,
+because calibration is a well-scoped follow-up (Platt scaling or
+temperature calibration on a held-out set).
+
+##### Cross-study summary
+
+| Interaction | Effect direction | Magnitude | Blocker to seeing more |
+|---|---|---|---|
+| Y × K (HMM cascade) | null | +0/-2.6 pp coverage | deterministic target opponent |
+| U × C (embedding CFR) | trade-off | **−29 % exploitability, −0.8 pp H2H** | k-selection heuristic; corpus size |
+| Y × L (HMM tool → LLM) | measurable behavioural change | −3 pp win rate at 25 % knock-suppression | HMM posterior calibration |
+
+**Cross-cutting lesson**: adding a probabilistic-belief module
+downstream of a deterministic target buys you nothing; adding it
+upstream of a *decision* module (LLM knock choice) *does* change
+behaviour immediately; adding it as a *representation* substitute (CFR
+bucketing) produces a real quantitative trade-off. Each of the three
+positions in the pipeline exposes a different failure mode.
+
+---
+
+#### 5e.xvi · Design totals and feasibility budget
 
 | Family | Factor count | Full-factorial cells | Recommended design |
 |--------|-------------:|---------------------:|-------------------|
